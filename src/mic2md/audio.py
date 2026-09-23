@@ -1,9 +1,10 @@
-"""Microphone capture and energy-based voice activity segmentation."""
+"""Microphone capture and voice activity segmentation."""
 
 from __future__ import annotations
 
 import queue
 from collections import deque
+from collections.abc import Callable
 
 import numpy as np
 
@@ -19,8 +20,10 @@ def rms(frame: np.ndarray) -> float:
 class Segmenter:
     """Splits a stream of audio frames into utterances separated by silence.
 
-    The speech threshold is calibrated from the first ``calibration_ms`` of audio
-    (assumed to be background noise) and then tracks the noise floor slowly.
+    With a ``detector`` (e.g. :class:`mic2md.vad.SileroDetector`) it decides which frames are
+    speech. Without one, frames louder than a threshold count as speech; the threshold is
+    calibrated from the first ``calibration_ms`` of audio (assumed to be background noise) and
+    then tracks the noise floor slowly.
     """
 
     def __init__(
@@ -35,6 +38,7 @@ class Segmenter:
         threshold_mult: float = 3.0,
         min_threshold: float = 0.004,
         threshold: float | None = None,
+        detector: Callable[[np.ndarray], bool] | None = None,
     ) -> None:
         self.sample_rate = sample_rate
         self.frame_ms = frame_ms
@@ -44,6 +48,7 @@ class Segmenter:
         self.threshold_mult = threshold_mult
         self.min_threshold = min_threshold
         self.fixed_threshold = threshold
+        self.detector = detector
 
         self._calib_frames = max(1, calibration_ms // frame_ms)
         self._calib: list[float] = []
@@ -54,6 +59,11 @@ class Segmenter:
         self._speech_frames = 0
         self._silent_run = 0
         self.level = 0.0
+        self.speaking = False
+        self._fed = 0  # samples seen so far
+        self._start = 0  # first sample of the utterance being buffered
+        # Start of the utterance last returned by feed()/flush(), in seconds from the first frame.
+        self.last_start_s: float | None = None
 
     @property
     def threshold(self) -> float:
@@ -65,7 +75,9 @@ class Segmenter:
 
     @property
     def calibrated(self) -> bool:
-        return self.fixed_threshold is not None or self._noise is not None
+        return (
+            self.detector is not None or self.fixed_threshold is not None or self._noise is not None
+        )
 
     @property
     def in_speech(self) -> bool:
@@ -79,6 +91,8 @@ class Segmenter:
         """Consume one frame; return a finished utterance when one ends."""
         level = rms(frame)
         self.level = level
+        pos = self._fed
+        self._fed += frame.size
 
         if not self.calibrated:
             self._calib.append(level)
@@ -87,10 +101,12 @@ class Segmenter:
                 self._noise = float(np.median(self._calib))
             return None
 
-        loud = level >= self.threshold
+        loud = self.detector(frame) if self.detector else level >= self.threshold
+        self.speaking = loud
 
         if not self._buf:
             if loud:
+                self._start = pos - sum(f.size for f in self._preroll)
                 self._buf = [*self._preroll, frame]
                 self._buf_samples = sum(f.size for f in self._buf)
                 self._speech_frames = 1
@@ -99,6 +115,7 @@ class Segmenter:
             else:
                 self._preroll.append(frame)
                 if self.fixed_threshold is None and self._noise is not None:
+                    # Only reached without a detector: with one, _noise stays None.
                     self._noise = 0.98 * self._noise + 0.02 * level
             return None
 
@@ -120,6 +137,7 @@ class Segmenter:
 
     def _finish(self) -> np.ndarray | None:
         audio = np.concatenate(self._buf)
+        self.last_start_s = self._start / self.sample_rate
         enough_speech = self._speech_frames >= self.min_speech_frames
         self._buf = []
         self._buf_samples = 0

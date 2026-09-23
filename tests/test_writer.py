@@ -150,3 +150,15 @@ def test_import_document_uses_session_pattern_and_avoids_collisions(tmp_path):
     assert second.name == "2026-09-01T14-00-01.md"
     got_meta, body = split_front_matter(first.read_text())
     assert got_meta["meeting"] == "Ext" and body.strip() == "Some notes."
+
+
+def test_append_prefixes_session_time(tmp_path):
+    from datetime import datetime
+
+    from mic2md.writer import SessionWriter
+
+    w = SessionWriter(tmp_path, datetime(2026, 9, 23, 10), "en", "m")
+    w.append("Hello.", at=3725.4)
+    w.append("No time.")
+    assert w.raw_text == "[01:02:05] Hello.\n\nNo time."
+    assert "[01:02:05] Hello.\n\nNo time.\n\n" in w.path.read_text()

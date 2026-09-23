@@ -48,6 +48,14 @@ paragraphs, use `## ` headings for clearly distinct topics, and bullet or number
 the speaker enumerates items. Use **bold** sparingly.
 - If the speaker dictates formatting (e.g. "new paragraph", "bullet point", "heading"), apply \
 it instead of writing the words.
+- `(?)` right after a word means the speech recognizer was unsure of it. Replace the word with \
+what was most likely said, using the context (and the names and terms listed, if any), and \
+always drop the `(?)` marker.
+- Lines may start with a `[HH:MM:SS]` timestamp (time into the recording). Don't keep them on \
+every sentence. Instead, end each `## ` heading with the time its section starts, as \
+`(HH:MM:SS)`, e.g. `## Budget (00:12:31)`. Without headings, put it at the end of the first \
+line of each paragraph that starts a new topic. The `# ` title gets no time. Never invent or \
+change times.
 - Output only the Markdown document: no preamble, no explanations, no code fences."""
 
 
@@ -89,6 +97,8 @@ if there are none.
 
 Rules:
 - Only use information from the transcript. Do not invent names, dates, or details.
+- If the transcript has times like `[00:12:31]` or `(00:12:31)`, add the time where a decision \
+or action item was discussed, e.g. "(00:12:31)" in the Context/notes column.
 - If the transcript is unclear or the speaker can't be identified, flag it with "[unclear]".
 - Ignore small talk, filler words, and off-topic tangents.
 - Keep it concise. Someone who wasn't in the meeting should understand the result in under \
@@ -164,16 +174,40 @@ def strip_wrapping(text: str) -> str:
     return text
 
 
-def build_messages(transcript: str, language: str) -> list[dict[str, str]]:
+_TITLE_TIME = re.compile(r"^(# [^\n]*?)\s*\(\d{2}:\d{2}:\d{2}\)[ \t]*$", re.M)
+
+
+def drop_title_time(text: str) -> str:
+    """Models like to put the first section's time on the `# ` title as well; remove it there."""
+    return _TITLE_TIME.sub(r"\1", text, count=1)
+
+
+def terms_rule(terms: list[str] | None) -> str:
+    """Extra prompt rule for glossary terms and names (empty when there are none)."""
+    if not terms:
+        return ""
+    return (
+        "\n- Spell these names and terms exactly like this when they occur (the speech "
+        "recognizer may have misheard them): " + ", ".join(terms) + "."
+    )
+
+
+def build_messages(
+    transcript: str, language: str, terms: list[str] | None = None
+) -> list[dict[str, str]]:
     lang = LANGUAGE_NAMES.get(language, language)
     return [
-        {"role": "system", "content": SYSTEM_PROMPT.format(language=lang)},
+        {"role": "system", "content": SYSTEM_PROMPT.format(language=lang) + terms_rule(terms)},
         {"role": "user", "content": f"Transcript:\n\n<transcript>\n{transcript}\n</transcript>"},
     ]
 
 
 def build_summary_messages(
-    transcript: str, language: str, meeting: str = "", participants: str = ""
+    transcript: str,
+    language: str,
+    meeting: str = "",
+    participants: str = "",
+    terms: list[str] | None = None,
 ) -> list[dict[str, str]]:
     lang = LANGUAGE_NAMES.get(language, language)
     context = ""
@@ -182,7 +216,7 @@ def build_summary_messages(
     if participants:
         context += f"Invited participants (from the calendar): {participants}\n"
     return [
-        {"role": "system", "content": SUMMARY_PROMPT.format(language=lang)},
+        {"role": "system", "content": SUMMARY_PROMPT.format(language=lang) + terms_rule(terms)},
         {
             "role": "user",
             "content": f"{context}Transcript:\n\n<transcript>\n{transcript}\n</transcript>",
@@ -256,9 +290,11 @@ def polish(
     on_token: Callable[[str], None] | None = None,
     timeout: float = 600.0,
     backend: str = OLLAMA,
+    terms: list[str] | None = None,
 ) -> str:
     """Stream a polished Markdown version of ``transcript``."""
-    return chat(build_messages(transcript, language), model, url, on_token, timeout, backend)
+    messages = build_messages(transcript, language, terms)
+    return drop_title_time(chat(messages, model, url, on_token, timeout, backend))
 
 
 def summarize(
@@ -271,9 +307,10 @@ def summarize(
     on_token: Callable[[str], None] | None = None,
     timeout: float = 600.0,
     backend: str = OLLAMA,
+    terms: list[str] | None = None,
 ) -> str:
     """Stream meeting notes (summary, decisions, action items…) for ``transcript``."""
-    messages = build_summary_messages(transcript, language, meeting, participants)
+    messages = build_summary_messages(transcript, language, meeting, participants, terms)
     return chat(messages, model, url, on_token, timeout, backend)
 
 

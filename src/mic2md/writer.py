@@ -106,7 +106,10 @@ class SessionWriter:
     def raw_text(self) -> str:
         return "\n\n".join(self.lines)
 
-    def append(self, text: str) -> None:
+    def append(self, text: str, at: float | None = None) -> None:
+        """Add a finished line; ``at`` (seconds into the session) becomes a [HH:MM:SS] prefix."""
+        if at is not None:
+            text = f"[{format_duration(timedelta(seconds=at))}] {text}"
         self.lines.append(text)
         with self.path.open("a", encoding="utf-8") as fh:
             fh.write(text + "\n\n")

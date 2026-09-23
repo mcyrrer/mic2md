@@ -29,7 +29,9 @@ uv tool install --reinstall .         # install/update the global `mic2md` comma
 src/mic2md/
   cli.py          Typer app. `main` (record), `polish FILE` (alias `p`), `summarize [FILE]`
                   (alias `s`), `tag`, `reindex`, `models`. Recorder class = main loop.
-  audio.py        MicStream (sounddevice → queue of 30 ms float32 frames) + Segmenter (energy VAD)
+  audio.py        MicStream (sounddevice → queue of 30 ms float32 frames) + Segmenter (utterances;
+                  speech decided by a detector, or an energy threshold without one)
+  vad.py          SileroDetector (pysilero-vad): 30 ms frames → 512-sample chunks, hysteresis
   transcriber.py  pywhispercpp wrapper; clean_text() strips [BLANK_AUDIO] & known hallucinations
   models.py       REGISTRY of ggml models per language, cache dir, httpx downloader
   llm.py          chat() → Ollama /api/chat, `claude -p` (stream-json) or `copilot -p`
@@ -48,8 +50,13 @@ lauche.sh         Legacy record-then-transcribe script (predecessor, kept for re
 1. `MicStream` callback puts frames on a `queue.Queue` (audio thread; do no work there).
 2. `Recorder.run` (main thread) drains the queue and calls `Segmenter.feed`. A returned array
    is a finished utterance, which goes to `commit()`: transcribe, print, `writer.append`.
-3. While in speech, `maybe_partial()` re-transcribes the in-progress buffer about every 1 s
-   and shows it in `LiveView.partial`. Partials are never saved.
+3. While in speech, `maybe_partial()` re-transcribes the in-progress buffer with
+   `partial=True` (small `audio_ctx`, greedy best_of 1, no temperature fallback) and shows it
+   in `LiveView.partial`. The next partial waits max(0.3 s, 2 × the last one's duration).
+   Partials are never saved. Finished utterances use the full context and beam search
+   (`--beam-size`, default 5; ~8% slower than greedy, measured). `decode_params` returns the
+   strategy as "greedy"/"beam" and `Transcriber` maps it to the whisper.cpp enum, which is
+   settable per call.
 4. Ctrl+C raises `KeyboardInterrupt` in `run()`. `finish()` re-commits `pending` (an
    utterance interrupted mid-transcription), drains the leftover frames and flushes the
    segmenter.
@@ -83,6 +90,21 @@ lauche.sh         Legacy record-then-transcribe script (predecessor, kept for re
   `summarize` and `tag`; `index.known_tags` feeds existing tags back so the model reuses
   them. Tags are normalized to lowercase-hyphenated (`llm.normalize_tag`), max 8. A tagging
   failure only warns.
+- **Glossary**: `--glossary` / `<output_dir>/glossary.txt` (`cli._glossary_terms`,
+  `transcriber.read_glossary`). `transcriber.build_vocabulary` joins meeting, participants and
+  terms (≤600 chars) into `Transcriber.vocabulary`, which leads every Whisper prompt. The LLM
+  gets participants + terms via `llm.terms_rule` (polish and summarize).
+- **pywhispercpp keeps params between calls** (`Model.transcribe(**params)` sets them on a
+  shared struct). Set every param a call relies on each time, e.g. `initial_prompt=""`.
+- **Timestamps**: `Segmenter.last_start_s` (sample count incl. preroll) → `Recorder.commit(audio,
+  start)` → `SessionWriter.append(text, at=)` writes `[HH:MM:SS] text`. Only the file gets the
+  prefix; the terminal line and Whisper's prompt stay plain. `SYSTEM_PROMPT` turns them into
+  `## Heading (HH:MM:SS)`; `llm.drop_title_time` removes the one models put on the `# ` title.
+- **Uncertain words**: after a non-partial decode, `Transcriber._text_tokens` reads token bytes +
+  probabilities from `model._ctx` (ids ≥ `whisper_token_eot` are special, skipped);
+  `uncertain_words` groups them into words (min p of word-bearing tokens, < `UNCERTAIN_P` 0.4)
+  → `Transcriber.last_uncertain`. `Recorder.commit` underlines them (`ui.highlight_uncertain`)
+  and writes `word(?)` (`mark_uncertain`); `SYSTEM_PROMPT` tells the LLM to fix and drop it.
 - **Importing**: `polish` or `summarize` on a file outside `--output-dir` calls `_import_external` (asks
   for date/language/meeting/participants on a TTY, defaults otherwise) and
   `writer.import_document`, which copies it into `transcripts/YYYY-MM/` under a free
@@ -117,10 +139,17 @@ lauche.sh         Legacy record-then-transcribe script (predecessor, kept for re
 
 - `Transcriber.close()` frees the model with fd 2 muted. Without it, whisper.cpp prints
   `ggml_metal_free: deallocating` at exit.
-- The Segmenter calibrates the noise floor from the first 500 ms. Tests must feed quiet
-  frames first, or pass `threshold=`.
-- whisper.cpp pads input to 30 s internally, so a partial pass costs about the same as a
-  final one (~1 s for large models on an M-series chip). That's why partials are rate-limited.
+- Without a `detector`, the Segmenter calibrates the noise floor from the first 500 ms. Tests
+  must feed quiet frames first, or pass `threshold=` or `detector=`.
+- Silero is stateful: each `SileroDetector` must see the audio once and in order. `--vad`
+  defaults to silero; `cli._detector` falls back to the energy threshold (with a warning) if
+  it can't load, and `--threshold` implies energy.
+- pywhispercpp 1.5.1's own `whisper_vad_*` bindings are broken ("Unregistered type:
+  whisper_vad_context_wrapper"), which is why Silero comes from pysilero-vad.
+- whisper.cpp pads input to 30 s internally, so a full pass costs ~1 s for large models on an
+  M-series chip regardless of length. Partials limit the encoder with `audio_ctx`
+  (`transcriber.audio_ctx_for`), ~0.15 s for a few seconds of audio. Only multiples of 256
+  work: other sizes (128, 192, 320, 384, 448, 640) give garbage like "of" or repeated words.
 - When testing Ctrl+C from a non-interactive shell, background processes inherit SIGINT as
   ignored. Restore it first, e.g. `perl -e '$SIG{INT}="DEFAULT"; exec @ARGV' mic2md …`.
 - Manual end-to-end test without talking: generate speech with

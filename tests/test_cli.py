@@ -125,8 +125,8 @@ def test_summarize_without_file_records_polishes_then_summarizes(tmp_path, monke
 
     seen = {}
 
-    def fake_record(opts, backend, llm_model, ollama_url, output_dir, tag=True):
-        seen.update(opts=opts, tag=tag, output_dir=output_dir)
+    def fake_record(opts, backend, llm_model, ollama_url, output_dir, terms=None, tag=True):
+        seen.update(opts=opts, tag=tag, output_dir=output_dir, terms=terms)
         writer = cli.SessionWriter(output_dir, datetime(2026, 9, 23, 10), opts.lang.value, "m")
         writer.append("um we ship friday")
         writer.finalize("# Shipping\n\nWe ship on Friday.", "qwen", datetime(2026, 9, 23, 11))
@@ -135,13 +135,16 @@ def test_summarize_without_file_records_polishes_then_summarizes(tmp_path, monke
     monkeypatch.setattr(cli, "_record", fake_record)
     monkeypatch.setattr(cli, "_stream_llm", _fake_llm("## Executive summary\n\nShip Friday."))
     args = ["-m", "small", "--no-calendar", "summarize", "-l", "sv", "-o", str(tmp_path)]
+    monkeypatch.delenv("MIC2MD_BEAM_SIZE", raising=False)
 
     result = CliRunner().invoke(cli.app, args, input="")
 
     assert result.exit_code == 0, result.output
     assert seen["tag"] is False  # tags come from the summarize pass
+    assert seen["terms"] == []  # no glossary.txt in the output folder
     assert seen["opts"].model_size == "small" and seen["opts"].no_calendar
     assert seen["opts"].lang == cli.Lang.sv
+    assert seen["opts"].beam_size == 5 and seen["opts"].vad == cli.Vad.silero
     (session,) = (tmp_path / "transcripts").rglob("*.md")
     text = session.read_text()
     assert text.index("Ship Friday.") < text.index("We ship on Friday.")
@@ -252,3 +255,150 @@ def test_tag_command_tags_untagged_sessions_and_keeps_body(tmp_path, monkeypatch
     )
     assert "tags: [old]" in tagged.read_text()
     assert "`q4-budget` `hiring`" in (tmp_path / "index.md").read_text()
+
+
+def test_glossary_file_in_output_dir_reaches_polish_prompt(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from mic2md import cli
+
+    (tmp_path / "glossary.txt").write_text("# products\nKBLab\n\nmic2md\nKBLab\n")
+    f = tmp_path / "transcripts" / "2026-09" / "2026-09-23T10-00-00.md"
+    f.parent.mkdir(parents=True)
+    f.write_text("---\nlanguage: en\nparticipants: Ada Lovelace\n---\n\n# Transcript x\n\nbody\n")
+    seen = {}
+
+    def fake(task, backend, model, url, call, fallback, quiet=False):
+        if task == "tagging":
+            return ["x"]
+
+        def fake_chat(messages, *args):
+            seen["m"] = messages
+            return "# T"
+
+        monkeypatch.setattr(cli.llm, "chat", fake_chat)
+        call(lambda t: None)
+        return "# T\n\nBody."
+
+    monkeypatch.setattr(cli, "_stream_llm", fake)
+    result = CliRunner().invoke(cli.app, ["polish", str(f), "-o", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    system = seen["m"][0]["content"]
+    assert (
+        "exactly like this when they occur (the speech recognizer may have misheard them): "
+        "Ada Lovelace, KBLab, mic2md." in system
+    )
+
+
+def test_glossary_option_overrides_default_file(tmp_path):
+    from mic2md import cli
+
+    (tmp_path / "glossary.txt").write_text("Default\n")
+    other = tmp_path / "other.txt"
+    other.write_text("Other\n")
+    assert cli._glossary_terms(None, tmp_path) == ["Default"]
+    assert cli._glossary_terms(other, tmp_path) == ["Other"]
+    assert cli._glossary_terms(None, tmp_path / "missing") == []
+
+
+def test_detector_choice_and_fallback(monkeypatch):
+    from mic2md import cli, vad
+
+    assert cli._detector(cli.RecordOptions(vad=cli.Vad.energy)) is None
+    assert cli._detector(cli.RecordOptions(threshold=0.01)) is None
+    assert isinstance(cli._detector(cli.RecordOptions()), vad.SileroDetector)
+
+    def broken(*a, **k):
+        raise OSError("no model")
+
+    monkeypatch.setattr(vad, "SileroDetector", broken)
+    assert cli._detector(cli.RecordOptions()) is None
+
+
+def test_partials_are_fast_mode_and_rate_limited_by_their_own_cost(monkeypatch):
+    import numpy as np
+
+    from mic2md import cli
+
+    class FakeTranscriber:
+        def __init__(self):
+            self.calls = []
+
+        def transcribe(self, audio, prompt=None, partial=False):
+            self.calls.append(partial)
+            clock[0] += 0.5  # each partial "takes" 0.5 s
+            return "partial"
+
+    class FakeSeg:
+        in_speech = True
+
+        def current(self):
+            return np.zeros(cli.SAMPLE_RATE, np.float32)
+
+    clock = [100.0]
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock[0])
+    tr = FakeTranscriber()
+    rec = cli.Recorder(tr, FakeSeg(), writer=None, view=cli.LiveView("en", "m"))
+    rec.maybe_partial()
+    assert tr.calls == [True] and rec.view.partial == "partial"
+    clock[0] += 0.9  # < 2 × 0.5 s since the last one ended
+    rec.maybe_partial()
+    assert len(tr.calls) == 1
+    clock[0] += 0.2
+    rec.maybe_partial()
+    assert len(tr.calls) == 2
+
+
+def test_commit_writes_timestamped_line_and_keeps_context_plain(tmp_path, monkeypatch):
+    from datetime import datetime
+
+    import numpy as np
+
+    from mic2md import cli
+
+    class FakeTranscriber:
+        def transcribe(self, audio, prompt=None, partial=False):
+            self.prompt = prompt
+            return "We ship on Friday."
+
+    monkeypatch.setattr(cli.console, "print", lambda *a, **k: None)
+    writer = cli.SessionWriter(tmp_path, datetime(2026, 9, 23, 10), "en", "m")
+    tr = FakeTranscriber()
+    rec = cli.Recorder(tr, segmenter=None, writer=writer, view=cli.LiveView("en", "m"))
+    rec.commit(np.zeros(10, np.float32), start=75.0)
+    rec.commit(np.zeros(10, np.float32), start=80.0)
+    assert writer.lines[0] == "[00:01:15] We ship on Friday."
+    assert tr.prompt == "We ship on Friday."  # no timestamp in Whisper's prompt
+    assert rec.pending is None
+
+
+def test_commit_marks_uncertain_words_in_file_but_not_in_context(tmp_path, monkeypatch):
+    from datetime import datetime
+
+    import numpy as np
+
+    from mic2md import cli
+
+    class FakeTranscriber:
+        last_uncertain = {"okta"}
+
+        def transcribe(self, audio, prompt=None, partial=False):
+            return "We touch Okta."
+
+    printed = []
+    monkeypatch.setattr(cli.console, "print", lambda obj, **k: printed.append(obj))
+    writer = cli.SessionWriter(tmp_path, datetime(2026, 9, 23, 10), "en", "m")
+    rec = cli.Recorder(FakeTranscriber(), segmenter=None, writer=writer, view=None)
+    rec.view = cli.LiveView("en", "m")
+    rec.commit(np.zeros(10, np.float32), start=1.0)
+    assert writer.lines == ["[00:00:01] We touch Okta(?)."]
+    assert rec.context == "We touch Okta."
+    assert printed[0].plain == "We touch Okta."
+    assert any("underline" in str(span.style) for span in printed[0].spans)
+
+
+def test_polish_prompt_explains_uncertain_marker():
+    from mic2md import llm
+
+    assert "`(?)` right after a word" in llm.build_messages("x", "en")[0]["content"]

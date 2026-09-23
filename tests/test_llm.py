@@ -200,3 +200,16 @@ def test_extract_tags_rejects_empty(monkeypatch):
     monkeypatch.setattr(llm, "chat", lambda *a, **k: "[]")
     with pytest.raises(llm.LLMError):
         llm.extract_tags("x", "en")
+
+
+def test_prompts_keep_timestamps_as_section_times():
+    system = llm.build_messages("[00:00:01] hi", "en")[0]["content"]
+    assert "`## Budget (00:12:31)`" in system and "Never invent or change times" in system
+    summary = llm.build_summary_messages("[00:00:01] hi", "en")[0]["content"]
+    assert "Context/notes column" in summary
+
+
+def test_drop_title_time_only_touches_the_title():
+    text = "# Budget and hiring (00:00:02)\n\n## Budget (00:00:02)\nText."
+    assert llm.drop_title_time(text) == "# Budget and hiring\n\n## Budget (00:00:02)\nText."
+    assert llm.drop_title_time("# Plain\n\nx") == "# Plain\n\nx"

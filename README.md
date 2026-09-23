@@ -22,7 +22,7 @@ so the next thing is…                                     ← live partial, up
 ──────────────────────── Polishing with qwen3.5:9b ────────────────────
 # New Release Update
 
-Today, I want to talk about the new release. There are two main tasks:
+Today, I want to talk about the new release (00:00:00). There are two main tasks:
 
 - Fix the login bug.
 - Update the documentation.
@@ -35,8 +35,18 @@ Index updated: ~/Documents/mic2md/index.md
 
 ## Features
 
-- **Live transcription.** A grey partial line updates about once a second while you speak.
+- **Live transcription.** A grey partial line updates several times a second while you speak
+  (a fast Whisper pass that only encodes the audio so far).
   Each sentence is committed as soon as you pause.
+- **Neural speech detection.** [Silero VAD](https://github.com/snakers4/silero-vad) decides
+  when you're speaking, so fans, typing and room noise don't start or cut off sentences.
+  `--vad energy` switches to a simple loudness threshold instead.
+- **Timestamps.** Every line in the raw transcript starts with the time into the recording,
+  e.g. `[00:12:31]`. Polishing keeps one per section (`## Budget (00:12:31)`) and `summarize`
+  notes when decisions and action items were discussed, so you can find them in a long meeting.
+- **Uncertain words flagged.** Words Whisper wasn't sure of are underlined in yellow as you
+  talk and marked `word(?)` in the raw transcript. The LLM uses the marker to fix exactly those
+  words (e.g. a misheard name from the glossary) and removes it.
 - **Crash-safe saving.** Every committed sentence is appended to the session file right
   away, so a crash or closed terminal doesn't lose what you said.
 - **Meeting detection.** When recording starts, mic2md checks the macOS Calendar for a
@@ -44,6 +54,10 @@ Index updated: ~/Documents/mic2md/index.md
   as `meeting:` and `participants:` in the front matter. If there is no meeting, you're asked
   for a name and participants (only in an interactive terminal; press Enter to skip). The first
   run asks for Calendar access. Turn this off with `--no-calendar`.
+- **Glossary for names and jargon.** The meeting title, the participants and the terms in
+  `glossary.txt` in the output folder (one per line, `#` for comments; or `--glossary FILE`)
+  are given to Whisper as a prompt, so names and product terms are spelled correctly while you
+  talk. The LLM gets the same list and uses that spelling when polishing and summarizing.
 - **LLM polish at the end.** Fixes spelling, grammar and punctuation, removes filler words,
   adds a title, headings and lists, and keeps the original language. Once polishing succeeds,
   the file holds only the polished text. Runs on local Ollama by default, or on Claude
@@ -124,8 +138,8 @@ mic2md reindex                          # rebuild index.md
 mic2md models                           # list models and which are downloaded
 ```
 
-`--backend`, `--llm`, `--lang`, `--ollama-url` and `--output-dir` also work with the
-commands, before or after the command name: `mic2md -b claude summarize FILE` and
+`--backend`, `--llm`, `--lang`, `--ollama-url`, `--output-dir` and `--glossary` also work
+with the commands, before or after the command name: `mic2md -b claude summarize FILE` and
 `mic2md summarize FILE -b claude` do the same thing. Recording-only options (`-m`,
 `--model-path`, `-d`, `--silence-ms`, `--threshold`, `--no-calendar`) go before the command,
 e.g. `mic2md -d 3 summarize`.
@@ -152,12 +166,15 @@ Without a command, `mic2md` records. `p` and `s` are short for `polish` and `sum
 | `-b, --backend` | `MIC2MD_BACKEND` | `ollama` | `ollama` (local), `claude` (runs `claude -p`) or `copilot` (runs GitHub Copilot CLI `copilot -p`). The last two send the text to the cloud |
 | `--llm` | `MIC2MD_LLM` | `qwen3.5:9b` / `sonnet` / Copilot's default | Model for polishing, summaries and tags. With `claude`: `sonnet`, `opus`, `fable`, `haiku` or a full model ID. With `copilot`: e.g. `gpt-5.4` |
 | `--no-llm` | | off | Skip the LLM pass (polish and tags) and save the raw transcript |
+| `--glossary` | `MIC2MD_GLOSSARY` | `glossary.txt` in the output folder, if present | Names and terms, one per line, for Whisper and the LLM |
 | `--no-calendar` | `MIC2MD_NO_CALENDAR` | off | Skip the meeting lookup (Calendar, then a prompt if none is found) |
 | `--ollama-url` | `OLLAMA_HOST` | `http://localhost:11434` | Ollama server |
 | `-o, --output-dir` | `MIC2MD_OUTPUT_DIR` | `~/Documents/mic2md` | Holds `index.md` and `transcripts/YYYY-MM/` |
 | `-d, --device` | `MIC2MD_DEVICE` | system default | Microphone ID or name |
+| `--vad` | `MIC2MD_VAD` | `silero` | Speech detection: `silero` (neural) or `energy` (loudness threshold) |
+| `--beam-size` | `MIC2MD_BEAM_SIZE` | `5` | Beam search width for finished sentences; `1` = greedy (a bit faster) |
 | `--silence-ms` | | `700` | Pause length that ends a sentence |
-| `--threshold` | | auto | Fixed speech RMS threshold (for noisy rooms) |
+| `--threshold` | | auto | Fixed speech RMS threshold; implies `--vad energy` |
 | `--list-devices` | | | List microphones and exit |
 | `--version` | | | Show the version and exit |
 
@@ -195,14 +212,15 @@ llm_model: qwen3.5:9b
 
 # New Release Update
 
-Today, I want to talk about the new release. There are two main tasks:
+Today, I want to talk about the new release (00:00:00). There are two main tasks:
 
 - Fix the login bug.
 - Update the documentation.
 ```
 
 If the LLM isn't reachable, or you pass `--no-llm`, the file contains the front matter, a
-`# Transcript YYYY-MM-DD HH:MM` heading and the raw transcript. You can polish it later with
+`# Transcript YYYY-MM-DD HH:MM` heading and the raw transcript, one timestamped line per
+sentence (`[00:00:03] First we need to fix the login bug.`) and `(?)` after uncertain words. You can polish it later with
 `mic2md polish FILE`.
 
 `mic2md summarize` adds `summary_model:` to the front matter and puts the meeting notes
@@ -213,17 +231,21 @@ a `---` line and the transcript. Imported files also get `source:` with the orig
 
 ```
 Calendar ─▶ meeting + participants (front matter)
-mic ─▶ 30 ms frames ─▶ energy VAD ─┬─▶ in speech: transcribe buffer every ~1 s ─▶ grey partial line
+mic ─▶ 30 ms frames ─▶ Silero VAD ─┬─▶ in speech: fast pass on the buffer (~0.2 s) ─▶ grey partial line
                                    └─▶ pause ≥ 700 ms ─▶ final transcription ─▶ printed + appended to .md
 Ctrl+C ─▶ flush last words ─▶ LLM polish (streamed) ─▶ LLM tags ─▶ polished .md (raw replaced) ─▶ index.md
 ```
 
 1. **Capture.** `sounddevice` records 16 kHz mono audio in 30 ms frames.
-2. **Segmentation.** The first half second calibrates the background noise level. Frames
-   louder than about 3× that level count as speech, and a pause ends an utterance.
-   Utterances longer than 25 s are split.
+2. **Segmentation.** Silero VAD (through `pysilero-vad`, model included) gives a speech
+   probability for every 32 ms, and a pause ends an utterance. Utterances longer than 25 s are
+   split. With `--vad energy` the first half second calibrates the background noise level
+   instead, and frames louder than about 3× that level count as speech.
 3. **Transcription.** whisper.cpp (through `pywhispercpp`) transcribes each utterance. The
-   previous sentence is passed as context to keep terminology and punctuation consistent.
+   meeting title, participants, glossary and previous sentence are passed as a prompt to keep
+   names, terminology and punctuation consistent. The live partial line uses a quick pass that
+   only encodes the audio so far (`audio_ctx`) instead of Whisper's full 30 s window; finished
+   sentences get the full window and beam search (5 beams, `--beam-size`).
    Known Whisper hallucinations on silence, like "Thanks for watching", are filtered out.
 4. **Polish.** The full transcript goes to the LLM once (Ollama `/api/chat`, `claude -p` or
    `copilot -p`), with instructions to fix errors and structure the text without adding,
@@ -244,7 +266,7 @@ Ctrl+C ─▶ flush last words ─▶ LLM polish (streamed) ─▶ LLM tags ─�
 
 ## Development
 
-Source: <https://github.com/mcyrrer/McVoice2Text>. See [CLAUDE.md](CLAUDE.md) for architecture
+Source: <https://github.com/mcyrrer/mic2md>. See [CLAUDE.md](CLAUDE.md) for architecture
 and conventions. Run `make` to list shortcuts (`make check`, `make install`, …).
 
 ```bash

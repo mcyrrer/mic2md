@@ -21,7 +21,8 @@ from rich.text import Text
 
 from mic2md import __version__, index, llm, models
 from mic2md.audio import SAMPLE_RATE, MicStream, Segmenter, list_input_devices
-from mic2md.ui import LiveView
+from mic2md.transcriber import build_vocabulary, mark_uncertain, read_glossary
+from mic2md.ui import LiveView, highlight_uncertain
 from mic2md.writer import (
     SessionWriter,
     extract_summary,
@@ -42,13 +43,16 @@ app = typer.Typer(
     no_args_is_help=False,
     rich_markup_mode="rich",
     help="Real-time voice-to-text. Speak, watch the text appear, get a polished Markdown file.",
-    epilog="Without a command it records. --backend, --llm, --lang, --ollama-url and "
-    "--output-dir also apply to the commands, before or after the command name, e.g. "
+    epilog="Without a command it records. --backend, --llm, --lang, --ollama-url, "
+    "--output-dir and --glossary also apply to the commands, before or after the command "
+    "name, e.g. "
     "[bold]mic2md -b claude summarize FILE[/] or [bold]mic2md summarize FILE -b claude[/].",
 )
 
 DEFAULT_OUTPUT_DIR = Path.home() / "Documents" / "mic2md"
-PARTIAL_INTERVAL_S = 1.0
+# Partials are re-run at most this often, and at least twice as far apart as the last one
+# took, so they never hog the machine.
+PARTIAL_INTERVAL_S = 0.3
 MIN_PARTIAL_S = 0.8
 
 
@@ -78,11 +82,28 @@ ModelOpt = Annotated[
         "copilot: e.g. gpt-5.4 (default: Copilot's own).",
     ),
 ]
+GLOSSARY_FILE = "glossary.txt"
+GlossaryOpt = Annotated[
+    Path | None,
+    typer.Option(
+        "--glossary",
+        envvar="MIC2MD_GLOSSARY",
+        exists=True,
+        dir_okay=False,
+        help="Names and terms, one per line, that Whisper and the LLM should spell correctly. "
+        f"Default: {GLOSSARY_FILE} in the output folder, if it exists.",
+    ),
+]
 
 
 class Lang(StrEnum):
     en = "en"
     sv = "sv"
+
+
+class Vad(StrEnum):
+    silero = "silero"
+    energy = "energy"
 
 
 def _version(value: bool) -> None:
@@ -108,7 +129,7 @@ def _print_devices() -> None:
 
 
 # Options that may also be given before a subcommand (`mic2md -b claude summarize F`).
-SHARED_OPTIONS = ("lang", "backend", "llm_model", "ollama_url", "output_dir")
+SHARED_OPTIONS = ("lang", "backend", "llm_model", "ollama_url", "output_dir", "glossary")
 
 
 def _from_command_line(ctx: typer.Context, name: str) -> bool:
@@ -284,8 +305,31 @@ def _run_tags(
     return tags
 
 
+def _glossary_terms(glossary: Path | None, output_dir: Path) -> list[str]:
+    """Terms from ``--glossary``, else from glossary.txt in the output folder (if any)."""
+    path = glossary.expanduser() if glossary else output_dir / GLOSSARY_FILE
+    if not path.is_file():
+        return []
+    try:
+        return read_glossary(path)
+    except (OSError, UnicodeDecodeError) as e:
+        console.print(f"[yellow]⚠ Could not read the glossary:[/] {e}")
+        return []
+
+
+def _llm_terms(meta: dict[str, str], terms: list[str] | None) -> list[str]:
+    """Glossary terms plus the participants' names, for the LLM prompts."""
+    names = [n.strip() for n in meta.get("participants", "").split(",") if n.strip()]
+    return list(dict.fromkeys([*names, *(terms or [])]))
+
+
 def _run_polish(
-    transcript: str, language: str, backend: Backend, model: str, url: str
+    transcript: str,
+    language: str,
+    backend: Backend,
+    model: str,
+    url: str,
+    terms: list[str] | None = None,
 ) -> str | None:
     return _stream_llm(
         "polishing",
@@ -293,7 +337,13 @@ def _run_polish(
         model,
         url,
         lambda on_token: llm.polish(
-            transcript, language, model, url, on_token=on_token, backend=backend.value
+            transcript,
+            language,
+            model,
+            url,
+            on_token=on_token,
+            backend=backend.value,
+            terms=terms,
         ),
         "keeping raw transcript",
     )
@@ -308,18 +358,22 @@ class Recorder:
         self.writer = writer
         self.view = view
         self.context = ""
-        self.pending: np.ndarray | None = None
+        # (audio, start) of an utterance whose transcription Ctrl+C interrupted.
+        self.pending: tuple[np.ndarray, float | None] | None = None
         self._last_partial = 0.0
+        self._partial_gap = PARTIAL_INTERVAL_S
 
-    def commit(self, audio: np.ndarray) -> None:
-        self.pending = audio
+    def commit(self, audio: np.ndarray, start: float | None = None) -> None:
+        """Transcribe a finished utterance and save it; ``start`` is seconds into the session."""
+        self.pending = (audio, start)
         self.view.busy = True
         text = self.transcriber.transcribe(audio, prompt=self.context)
         self.view.busy = False
         self.view.partial = ""
         if text:
-            console.print(text, highlight=False, markup=False)
-            self.writer.append(text)
+            uncertain = getattr(self.transcriber, "last_uncertain", set())
+            console.print(highlight_uncertain(text, uncertain), highlight=False)
+            self.writer.append(mark_uncertain(text, uncertain), at=start)
             self.context = text
         self.pending = None
 
@@ -327,24 +381,25 @@ class Recorder:
         for frame in frames:
             done = self.seg.feed(frame)
             if done is not None:
-                self.commit(done)
+                self.commit(done, self.seg.last_start_s)
             elif not self.seg.in_speech:
                 self.view.partial = ""
         self.view.level = self.seg.level
-        self.view.threshold = self.seg.threshold
+        self.view.speaking = self.seg.speaking
         self.view.calibrated = self.seg.calibrated
 
     def maybe_partial(self) -> None:
         now = time.monotonic()
-        if not self.seg.in_speech or now - self._last_partial < PARTIAL_INTERVAL_S:
+        if not self.seg.in_speech or now - self._last_partial < self._partial_gap:
             return
         current = self.seg.current()
         if current is None or current.size < MIN_PARTIAL_S * SAMPLE_RATE:
             return
         self.view.busy = True
-        self.view.partial = self.transcriber.transcribe(current, prompt=self.context)
+        self.view.partial = self.transcriber.transcribe(current, prompt=self.context, partial=True)
         self.view.busy = False
         self._last_partial = time.monotonic()
+        self._partial_gap = max(PARTIAL_INTERVAL_S, 2 * (self._last_partial - now))
 
     def run(self, mic: MicStream) -> None:
         with Live(self.view, console=console, refresh_per_second=10, transient=True):
@@ -368,12 +423,12 @@ class Recorder:
             leftover.append(mic.frames.get_nowait())
         with console.status("Transcribing the last words…"):
             if self.pending is not None:
-                self.commit(self.pending)
+                self.commit(*self.pending)
             for frame in leftover:
                 if (done := self.seg.feed(frame)) is not None:
-                    self.commit(done)
+                    self.commit(done, self.seg.last_start_s)
             if (tail := self.seg.flush()) is not None:
-                self.commit(tail)
+                self.commit(tail, self.seg.last_start_s)
 
 
 @app.callback(invoke_without_command=True)
@@ -429,6 +484,25 @@ def main(
             help="Input device ID or name (see --list-devices).",
         ),
     ] = None,
+    vad: Annotated[
+        Vad,
+        typer.Option(
+            "--vad",
+            envvar="MIC2MD_VAD",
+            help="Speech detection: silero (neural, robust to noise) or energy (loudness "
+            "threshold). --threshold implies energy.",
+        ),
+    ] = Vad.silero,
+    beam_size: Annotated[
+        int,
+        typer.Option(
+            "--beam-size",
+            envvar="MIC2MD_BEAM_SIZE",
+            min=1,
+            help="Beam search width for finished sentences (1 = greedy, faster). "
+            "The live partial line is always greedy.",
+        ),
+    ] = 5,
     silence_ms: Annotated[
         int, typer.Option("--silence-ms", help="Pause length (ms) that ends a sentence.")
     ] = 700,
@@ -444,6 +518,7 @@ def main(
             help="Don't look up or ask for the current meeting.",
         ),
     ] = False,
+    glossary: GlossaryOpt = None,
     list_devices: Annotated[
         bool, typer.Option("--list-devices", help="List microphones and exit.")
     ] = False,
@@ -452,6 +527,18 @@ def main(
     ] = None,
 ) -> None:
     """Record from the microphone until Ctrl+C. Text is shown live and saved to Markdown."""
+    opts = RecordOptions(
+        lang=lang,
+        model_size=model_size,
+        model_path=model_path,
+        no_llm=no_llm,
+        device=device,
+        silence_ms=silence_ms,
+        threshold=threshold,
+        no_calendar=no_calendar,
+        vad=vad,
+        beam_size=beam_size,
+    )
     if ctx.invoked_subcommand is not None:
         # The converted values (Path, enums), not the raw strings in ctx.params.
         values = {
@@ -460,23 +547,34 @@ def main(
             "llm_model": llm_model,
             "ollama_url": ollama_url,
             "output_dir": output_dir,
+            "glossary": glossary,
         }
         ctx.obj = {n: values[n] for n in SHARED_OPTIONS if _from_command_line(ctx, n)}
         # For `summarize` without a file, which records first.
-        ctx.obj[RECORD_KEY] = RecordOptions(
-            lang, model_size, model_path, no_llm, device, silence_ms, threshold, no_calendar
-        )
+        ctx.obj[RECORD_KEY] = opts
         return
     if list_devices:
         _print_devices()
         raise typer.Exit()
 
     llm_model = llm_model or llm.default_model(backend.value)
-    opts = RecordOptions(
-        lang, model_size, model_path, no_llm, device, silence_ms, threshold, no_calendar
-    )
-    writer, polished = _record(opts, backend, llm_model, ollama_url, output_dir.expanduser())
+    output_dir = output_dir.expanduser()
+    terms = _glossary_terms(glossary, output_dir)
+    writer, polished = _record(opts, backend, llm_model, ollama_url, output_dir, terms)
     _emit_stdout(polished or writer.raw_text)
+
+
+def _detector(opts: RecordOptions):
+    """Silero detector for the Segmenter, or None for the energy threshold (the fallback)."""
+    if opts.vad is Vad.energy or opts.threshold is not None:
+        return None
+    try:
+        from mic2md.vad import SileroDetector
+
+        return SileroDetector()
+    except Exception as e:  # missing wheel, broken model: energy still works
+        console.print(f"[yellow]⚠ Silero VAD unavailable, using the energy threshold:[/] {e}")
+        return None
 
 
 # ctx.obj key for the recording options given before a subcommand.
@@ -493,6 +591,8 @@ class RecordOptions:
     silence_ms: int = 700
     threshold: float | None = None
     no_calendar: bool = False
+    vad: Vad = Vad.silero
+    beam_size: int = 5
 
 
 def _record(
@@ -501,9 +601,12 @@ def _record(
     llm_model: str,
     ollama_url: str,
     output_dir: Path,
+    terms: list[str] | None = None,
     tag: bool = True,
 ) -> tuple[SessionWriter, str | None]:
     """Record until Ctrl+C, then polish, tag, save and update the index.
+
+    ``terms`` (the glossary) prime Whisper and the polish prompt with the right spelling.
 
     Returns the writer (its ``path`` is the session file) and the polished text, or None when
     the raw transcript was kept. Exits when nothing was said.
@@ -531,14 +634,20 @@ def _record(
     from mic2md.transcriber import Transcriber
 
     with console.status(f"Loading Whisper model [cyan]{model_name}[/]…"):
-        transcriber = Transcriber(path, language)
+        transcriber = Transcriber(path, language, beam_size=opts.beam_size)
 
     meeting_meta = {} if opts.no_calendar else _meeting_meta()
+    transcriber.vocabulary = build_vocabulary(
+        meeting_meta.get("meeting", ""), meeting_meta.get("participants", ""), terms or []
+    )
     started = datetime.now()
     writer = SessionWriter(output_dir, started, language, model_name, extra_meta=meeting_meta)
     view = LiveView(language, model_name)
     recorder = Recorder(
-        transcriber, Segmenter(silence_ms=opts.silence_ms, threshold=opts.threshold), writer, view
+        transcriber,
+        Segmenter(silence_ms=opts.silence_ms, threshold=opts.threshold, detector=_detector(opts)),
+        writer,
+        view,
     )
 
     console.print(f"[dim]Saving to {writer.path}[/]")
@@ -560,7 +669,16 @@ def _record(
         raise typer.Exit()
 
     polished = (
-        None if no_llm else _run_polish(writer.raw_text, language, backend, llm_model, ollama_url)
+        None
+        if no_llm
+        else _run_polish(
+            writer.raw_text,
+            language,
+            backend,
+            llm_model,
+            ollama_url,
+            _llm_terms(writer.meta, terms),
+        )
     )
     if (
         tag
@@ -606,6 +724,7 @@ def polish(
     ollama_url: Annotated[
         str, typer.Option("--ollama-url", envvar="OLLAMA_HOST", help="Ollama server URL.")
     ] = llm.DEFAULT_URL,
+    glossary: GlossaryOpt = None,
 ) -> None:
     """Re-run the LLM polish on a session file (on the raw transcript if present).
 
@@ -617,6 +736,7 @@ def polish(
     llm_model = _inherit(ctx, "llm_model", llm_model)
     ollama_url = _inherit(ctx, "ollama_url", ollama_url)
     output_dir = _inherit(ctx, "output_dir", output_dir).expanduser().resolve()
+    terms = _glossary_terms(_inherit(ctx, "glossary", glossary), output_dir)
     imported = not file.resolve().is_relative_to(output_dir)
     if imported:
         file = _import_external(file, output_dir, lang)
@@ -628,7 +748,7 @@ def polish(
         raise typer.Exit(1)
     language = lang.value if lang else meta.get("language", "en")
     llm_model = llm_model or llm.default_model(backend.value)
-    polished = _run_polish(raw, language, backend, llm_model, ollama_url)
+    polished = _run_polish(raw, language, backend, llm_model, ollama_url, _llm_terms(meta, terms))
     if polished is None:
         if imported:
             console.print(f"[dim]The imported file is kept: {file}[/]", soft_wrap=True)
@@ -695,6 +815,7 @@ def _record_for_summary(
     llm_model: str,
     ollama_url: str,
     output_dir: Path,
+    terms: list[str],
 ) -> Path:
     """Record and polish a new session for `summarize`; returns its file.
 
@@ -706,7 +827,7 @@ def _record_for_summary(
     if opts.no_llm:
         console.print("[red]--no-llm can't be combined with summarize.[/]")
         raise typer.Exit(2)
-    writer, polished = _record(opts, backend, llm_model, ollama_url, output_dir, tag=False)
+    writer, polished = _record(opts, backend, llm_model, ollama_url, output_dir, terms, tag=False)
     if polished is None:
         console.print(
             "[yellow]⚠ Skipping the summary because polishing didn't finish. Run "
@@ -750,6 +871,7 @@ def summarize(
     ollama_url: Annotated[
         str, typer.Option("--ollama-url", envvar="OLLAMA_HOST", help="Ollama server URL.")
     ] = llm.DEFAULT_URL,
+    glossary: GlossaryOpt = None,
 ) -> None:
     """Add an executive summary, decisions and action items to the top of a session file.
 
@@ -766,9 +888,10 @@ def summarize(
     llm_model = _inherit(ctx, "llm_model", llm_model) or llm.default_model(backend.value)
     ollama_url = _inherit(ctx, "ollama_url", ollama_url)
     output_dir = _inherit(ctx, "output_dir", output_dir).expanduser().resolve()
+    terms = _glossary_terms(_inherit(ctx, "glossary", glossary), output_dir)
     imported = False
     if file is None:
-        file = _record_for_summary(ctx, lang, backend, llm_model, ollama_url, output_dir)
+        file = _record_for_summary(ctx, lang, backend, llm_model, ollama_url, output_dir, terms)
     elif imported := not file.resolve().is_relative_to(output_dir):
         file = _import_external(file, output_dir, lang)
         _update_index(output_dir)
@@ -792,6 +915,7 @@ def summarize(
             url=ollama_url,
             on_token=on_token,
             backend=backend.value,
+            terms=terms,
         ),
         "file left unchanged",
     )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 import time
 
 from rich.console import Group
@@ -11,15 +12,27 @@ from rich.text import Text
 BARS = " ▁▂▃▄▅▆▇█"
 
 
-def level_meter(level: float, threshold: float, width: int = 8) -> Text:
-    """Log-scaled input meter; turns green once the level crosses the speech threshold."""
+def level_meter(level: float, speaking: bool, width: int = 8) -> Text:
+    """Log-scaled input meter; green while speech is detected."""
     # -60 dBFS .. 0 dBFS mapped onto the meter width.
     db = 20 * math.log10(level) if level > 0 else -60.0
     filled = max(0.0, min(1.0, (db + 60) / 60)) * width
     chars = "".join(
         BARS[round(max(0.0, min(1.0, filled - i)) * (len(BARS) - 1))] for i in range(width)
     )
-    return Text(chars, style="green" if level >= threshold else "grey50")
+    return Text(chars, style="green" if speaking else "grey50")
+
+
+UNCERTAIN_STYLE = "underline yellow"
+
+
+def highlight_uncertain(text: str, uncertain: set[str]) -> Text:
+    """``text`` with the words Whisper was unsure of underlined (keys as in ``word_key``)."""
+    out = Text(text)
+    for m in re.finditer(r"[\w'’-]+", text):
+        if re.sub(r"\W", "", m[0].lower()) in uncertain:
+            out.stylize(UNCERTAIN_STYLE, m.start(), m.end())
+    return out
 
 
 class LiveView:
@@ -29,7 +42,7 @@ class LiveView:
         self.started = time.monotonic()
         self.partial = ""
         self.level = 0.0
-        self.threshold = float("inf")
+        self.speaking = False
         self.calibrated = False
         self.busy = False
 
@@ -47,7 +60,7 @@ class LiveView:
         status.append(f"{self.language} · {self.model_name}  ", style="cyan")
         if self.calibrated:
             status.append("mic ", style="dim")
-            status.append_text(level_meter(self.level, self.threshold))
+            status.append_text(level_meter(self.level, self.speaking))
         else:
             status.append("calibrating — stay quiet…", style="yellow")
         if self.busy:
