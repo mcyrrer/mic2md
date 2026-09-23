@@ -103,6 +103,7 @@ mic2md --no-llm                         # raw transcript only, no LLM pass
 mic2md --no-calendar                    # don't look up or ask for the meeting
 mic2md --backend claude                 # polish with Claude (`claude -p`) instead of Ollama
 mic2md summarize                        # record a meeting, polish it, then add meeting notes
+mic2md s                                # same, short name (`p` = polish)
 mic2md -m small.en --no-calendar summarize   # recording options go before the command
 mic2md summarize FILE -b claude --llm opus   # meeting notes from Claude Opus
 mic2md summarize FILE -b copilot        # meeting notes via GitHub Copilot CLI
@@ -131,12 +132,12 @@ e.g. `mic2md -d 3 summarize`.
 
 ### Commands
 
-Without a command, `mic2md` records.
+Without a command, `mic2md` records. `p` and `s` are short for `polish` and `summarize`.
 
 | Command | Description |
 |---|---|
-| `polish FILE` | Re-run the LLM polish on a session file (keeps an existing summary); imports files from outside the output folder first |
-| `summarize [FILE]` | Add meeting notes to the top of a session file; imports files from outside the output folder first. Without FILE: record a new meeting, polish it, then summarize it |
+| `polish FILE` (`p`) | Re-run the LLM polish on a session file (keeps an existing summary); imports files from outside the output folder first |
+| `summarize [FILE]` (`s`) | Add meeting notes to the top of a session file; imports files from outside the output folder first. Without FILE: record a new meeting, polish it, then summarize it |
 | `tag [FILE...] [--all]` | Add topic tags. Named files are always re-tagged; `--all` picks every session without tags |
 | `reindex` | Rebuild `index.md` and move sessions saved by older versions into `transcripts/YYYY-MM/` |
 | `models` | List Whisper models and which are downloaded |

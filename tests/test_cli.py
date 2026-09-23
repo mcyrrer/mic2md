@@ -158,6 +158,23 @@ def test_summarize_without_file_rejects_no_llm(tmp_path, monkeypatch):
     assert result.exit_code == 2
 
 
+def test_short_names_run_polish_and_summarize(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from mic2md import cli
+
+    f = tmp_path / "transcripts" / "2026-09" / "2026-09-23T10-00-00.md"
+    f.parent.mkdir(parents=True)
+    f.write_text("---\nlanguage: en\n---\n\n# Transcript 2026-09-23 10:00\n\nbody\n")
+    monkeypatch.setattr(cli, "_stream_llm", _fake_llm("# T\n\nPolished."))
+    assert CliRunner().invoke(cli.app, ["p", str(f), "-o", str(tmp_path)]).exit_code == 0
+    assert "Polished." in f.read_text()
+
+    monkeypatch.setattr(cli, "_stream_llm", _fake_llm("## Summary here"))
+    assert CliRunner().invoke(cli.app, ["s", str(f), "-o", str(tmp_path)]).exit_code == 0
+    assert "## Summary here" in f.read_text()
+
+
 def _capture_summarize(tmp_path, monkeypatch):
     """Session file in tmp_path plus a fake LLM pass that records its backend and model."""
     from mic2md import cli

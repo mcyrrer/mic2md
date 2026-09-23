@@ -27,8 +27,8 @@ uv tool install --reinstall .         # install/update the global `mic2md` comma
 
 ```
 src/mic2md/
-  cli.py          Typer app. `main` (record), `polish FILE`, `summarize [FILE]`, `tag`, `reindex`,
-                  `models`. Recorder class = main loop.
+  cli.py          Typer app. `main` (record), `polish FILE` (alias `p`), `summarize [FILE]`
+                  (alias `s`), `tag`, `reindex`, `models`. Recorder class = main loop.
   audio.py        MicStream (sounddevice → queue of 30 ms float32 frames) + Segmenter (energy VAD)
   transcriber.py  pywhispercpp wrapper; clean_text() strips [BLANK_AUDIO] & known hallucinations
   models.py       REGISTRY of ggml models per language, cache dir, httpx downloader

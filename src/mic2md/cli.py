@@ -913,5 +913,10 @@ def list_models() -> None:
     console.print(table)
 
 
+# Short names. short_help is for the command list; `mic2md s --help` shows the full help.
+app.command("p", short_help="Short for polish.")(polish)
+app.command("s", short_help="Short for summarize.")(summarize)
+
+
 if __name__ == "__main__":
     app()
