@@ -352,11 +352,19 @@ def _run_polish(
 class Recorder:
     """Pulls mic frames, segments them, and transcribes partial + final utterances."""
 
-    def __init__(self, transcriber, segmenter: Segmenter, writer: SessionWriter, view: LiveView):
+    def __init__(
+        self,
+        transcriber,
+        segmenter: Segmenter,
+        writer: SessionWriter,
+        view: LiveView,
+        show_transcript: bool = False,
+    ):
         self.transcriber = transcriber
         self.seg = segmenter
         self.writer = writer
         self.view = view
+        self.show_transcript = show_transcript
         self.context = ""
         # (audio, start) of an utterance whose transcription Ctrl+C interrupted.
         self.pending: tuple[np.ndarray, float | None] | None = None
@@ -372,7 +380,8 @@ class Recorder:
         self.view.partial = ""
         if text:
             uncertain = getattr(self.transcriber, "last_uncertain", set())
-            console.print(highlight_uncertain(text, uncertain), highlight=False)
+            if self.show_transcript:
+                console.print(highlight_uncertain(text, uncertain), highlight=False)
             self.writer.append(mark_uncertain(text, uncertain), at=start)
             self.context = text
         self.pending = None
@@ -519,6 +528,14 @@ def main(
         ),
     ] = False,
     glossary: GlossaryOpt = None,
+    show_transcript: Annotated[
+        bool,
+        typer.Option(
+            "--transcript",
+            "-t",
+            help="Print the live transcript to the terminal as sentences finish.",
+        ),
+    ] = False,
     list_devices: Annotated[
         bool, typer.Option("--list-devices", help="List microphones and exit.")
     ] = False,
@@ -538,6 +555,7 @@ def main(
         no_calendar=no_calendar,
         vad=vad,
         beam_size=beam_size,
+        show_transcript=show_transcript,
     )
     if ctx.invoked_subcommand is not None:
         # The converted values (Path, enums), not the raw strings in ctx.params.
@@ -593,6 +611,7 @@ class RecordOptions:
     no_calendar: bool = False
     vad: Vad = Vad.silero
     beam_size: int = 5
+    show_transcript: bool = False
 
 
 def _record(
@@ -648,6 +667,7 @@ def _record(
         Segmenter(silence_ms=opts.silence_ms, threshold=opts.threshold, detector=_detector(opts)),
         writer,
         view,
+        show_transcript=opts.show_transcript,
     )
 
     console.print(f"[dim]Saving to {writer.path}[/]")

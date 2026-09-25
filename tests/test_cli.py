@@ -389,13 +389,38 @@ def test_commit_marks_uncertain_words_in_file_but_not_in_context(tmp_path, monke
     printed = []
     monkeypatch.setattr(cli.console, "print", lambda obj, **k: printed.append(obj))
     writer = cli.SessionWriter(tmp_path, datetime(2026, 9, 23, 10), "en", "m")
-    rec = cli.Recorder(FakeTranscriber(), segmenter=None, writer=writer, view=None)
+    rec = cli.Recorder(
+        FakeTranscriber(), segmenter=None, writer=writer, view=None, show_transcript=True
+    )
     rec.view = cli.LiveView("en", "m")
     rec.commit(np.zeros(10, np.float32), start=1.0)
     assert writer.lines == ["[00:00:01] We touch Okta(?)."]
     assert rec.context == "We touch Okta."
     assert printed[0].plain == "We touch Okta."
     assert any("underline" in str(span.style) for span in printed[0].spans)
+
+
+def test_commit_does_not_print_transcript_by_default(tmp_path, monkeypatch):
+    from datetime import datetime
+
+    import numpy as np
+
+    from mic2md import cli
+
+    class FakeTranscriber:
+        last_uncertain: set[str] = set()
+
+        def transcribe(self, audio, prompt=None, partial=False):
+            return "We touch Okta."
+
+    printed = []
+    monkeypatch.setattr(cli.console, "print", lambda obj, **k: printed.append(obj))
+    writer = cli.SessionWriter(tmp_path, datetime(2026, 9, 23, 10), "en", "m")
+    rec = cli.Recorder(FakeTranscriber(), segmenter=None, writer=writer, view=None)
+    rec.view = cli.LiveView("en", "m")
+    rec.commit(np.zeros(10, np.float32), start=1.0)
+    assert writer.lines == ["[00:00:01] We touch Okta."]
+    assert printed == []
 
 
 def test_polish_prompt_explains_uncertain_marker():
