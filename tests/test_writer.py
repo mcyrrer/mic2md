@@ -13,6 +13,15 @@ def test_session_filename_is_iso_and_filesystem_safe():
     assert session_filename(datetime(2026, 9, 23, 20, 5, 7)) == "2026-09-23T20-05-07.md"
 
 
+def test_session_filename_appends_title_slug_max_20_chars():
+    when = datetime(2026, 9, 23, 20, 5, 7)
+    assert (
+        session_filename(when, "Q4 Budget Planning Session Kickoff")
+        == "2026-09-23T20-05-07-q4-budget-planning-s.md"
+    )
+    assert session_filename(when, "  ") == "2026-09-23T20-05-07.md"
+
+
 def test_format_duration():
     assert format_duration(timedelta(hours=1, minutes=2, seconds=3)) == "01:02:03"
 
@@ -146,8 +155,10 @@ def test_import_document_uses_session_pattern_and_avoids_collisions(tmp_path):
     meta = {"date": when.isoformat(), "meeting": "Ext", "source": "/x/notes.md"}
     first = import_document(tmp_path, when, meta, "Some notes.")
     second = import_document(tmp_path, when, meta, "Other notes.")
-    assert first.relative_to(tmp_path).as_posix() == "transcripts/2026-09/2026-09-01T14-00-00.md"
-    assert second.name == "2026-09-01T14-00-01.md"
+    assert (
+        first.relative_to(tmp_path).as_posix() == "transcripts/2026-09/2026-09-01T14-00-00-ext.md"
+    )
+    assert second.name == "2026-09-01T14-00-01-ext.md"
     got_meta, body = split_front_matter(first.read_text())
     assert got_meta["meeting"] == "Ext" and body.strip() == "Some notes."
 

@@ -110,7 +110,10 @@ lauche.sh         Legacy record-then-transcribe script (predecessor, kept for re
   `writer.import_document`, which copies it into `transcripts/YYYY-MM/` under a free
   session name. The source file is never modified.
 - **File names** come from `writer.session_filename`: `%Y-%m-%dT%H-%M-%S.md`, ISO 8601 with
-  `-` instead of `:`. Front matter is flat `key: value` lines. `parse_document` depends on
+  `-` instead of `:`, plus a `-<slug>` suffix (`slugify_title`, lowercase-hyphenated, max 20
+  chars) when a meeting title is known. `index._SESSION_NAME` and `migrate_flat` must accept
+  both the bare and suffixed forms. Front matter is flat `key: value` lines. `parse_document`
+  depends on
   that format. It still reads the `<summary>Raw transcript</summary>` section that older
   polished files have; newer files contain only the polished body.
 - **Models**: add new ones only through `models.REGISTRY`. KBLab repos all use the remote
