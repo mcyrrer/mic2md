@@ -10,7 +10,7 @@ No audio or text leaves your machine. If you choose `--backend claude` or `--bac
 instead, the transcript text (never the audio) is sent to that cloud service.
 
 ```
-$ mic2md
+$ mic2md --transcript
 Meeting: Release planning
 Saving to ~/Documents/mic2md/transcripts/2026-09/2026-09-23T20-15-30.md
 ───────────────────────────── ● Listening ─────────────────────────────
@@ -37,7 +37,8 @@ Index updated: ~/Documents/mic2md/index.md
 
 - **Live transcription.** A grey partial line updates several times a second while you speak
   (a fast Whisper pass that only encodes the audio so far).
-  Each sentence is committed as soon as you pause.
+  Each sentence is committed as soon as you pause. Pass `--transcript`/`-t` to also print each
+  finished sentence to the terminal as it's saved.
 - **Neural speech detection.** [Silero VAD](https://github.com/snakers4/silero-vad) decides
   when you're speaking, so fans, typing and room noise don't start or cut off sentences.
   `--vad energy` switches to a simple loudness threshold instead.
@@ -84,7 +85,8 @@ Index updated: ~/Documents/mic2md/index.md
   `tag`, so don't edit it by hand. Run `mic2md reindex` to rebuild it yourself (this also moves
   sessions saved by older versions into the month folders).
 - **ISO 8601 file names**, e.g. `2026-09-23T20-15-30.md`, so files sort chronologically.
-  Colons are replaced with `-` because they aren't valid in filenames on all systems.
+  Colons are replaced with `-` because they aren't valid in filenames on all systems. When a
+  meeting title is known, it's added as a short slug, e.g. `2026-09-23T20-15-30-release-planning.md`.
 - **English and Swedish.** English uses OpenAI Whisper `large-v3-turbo`. Swedish uses
   [KB-Whisper](https://huggingface.co/KBLab) from the National Library of Sweden.
 - **Models download automatically** on first use.
@@ -171,6 +173,7 @@ Without a command, `mic2md` records. `p` and `s` are short for `polish` and `sum
 | `--ollama-url` | `OLLAMA_HOST` | `http://localhost:11434` | Ollama server |
 | `-o, --output-dir` | `MIC2MD_OUTPUT_DIR` | `~/Documents/mic2md` | Holds `index.md` and `transcripts/YYYY-MM/` |
 | `-d, --device` | `MIC2MD_DEVICE` | system default | Microphone ID or name |
+| `-t, --transcript` | | off | Print each finished sentence to the terminal as it's committed (the live partial line always shows) |
 | `--vad` | `MIC2MD_VAD` | `silero` | Speech detection: `silero` (neural) or `energy` (loudness threshold) |
 | `--beam-size` | `MIC2MD_BEAM_SIZE` | `5` | Beam search width for finished sentences; `1` = greedy (a bit faster) |
 | `--silence-ms` | | `700` | Pause length that ends a sentence |

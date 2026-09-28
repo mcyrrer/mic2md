@@ -43,10 +43,13 @@ app = typer.Typer(
     no_args_is_help=False,
     rich_markup_mode="rich",
     help="Real-time voice-to-text. Speak, watch the text appear, get a polished Markdown file.",
-    epilog="Without a command it records. --backend, --llm, --lang, --ollama-url, "
+    epilog="Without a command it records and summarizes (same as `summarize`). --backend, "
+    "--llm, --lang, --ollama-url, "
     "--output-dir and --glossary also apply to the commands, before or after the command "
     "name, e.g. "
-    "[bold]mic2md -b claude summarize FILE[/] or [bold]mic2md summarize FILE -b claude[/].",
+    "[bold]mic2md -b claude summarize FILE[/] or [bold]mic2md summarize FILE -b claude[/]. "
+    "For lower GPU load: "
+    "[bold]mic2md -m small.en --beam-size 1 --vad energy[/].",
 )
 
 DEFAULT_OUTPUT_DIR = Path.home() / "Documents" / "mic2md"
@@ -543,7 +546,7 @@ def main(
         bool | None, typer.Option("--version", callback=_version, is_eager=True)
     ] = None,
 ) -> None:
-    """Record from the microphone until Ctrl+C. Text is shown live and saved to Markdown."""
+    """Record from the microphone until Ctrl+C, then polish and summarize (like `summarize`)."""
     opts = RecordOptions(
         lang=lang,
         model_size=model_size,
@@ -575,11 +578,17 @@ def main(
         _print_devices()
         raise typer.Exit()
 
-    llm_model = llm_model or llm.default_model(backend.value)
-    output_dir = output_dir.expanduser()
-    terms = _glossary_terms(glossary, output_dir)
-    writer, polished = _record(opts, backend, llm_model, ollama_url, output_dir, terms)
-    _emit_stdout(polished or writer.raw_text)
+    ctx.obj = {RECORD_KEY: opts}
+    ctx.invoke(
+        summarize,
+        ctx,
+        lang=lang,
+        output_dir=output_dir,
+        backend=backend,
+        llm_model=llm_model,
+        ollama_url=ollama_url,
+        glossary=glossary,
+    )
 
 
 def _detector(opts: RecordOptions):
