@@ -1,13 +1,12 @@
 # mic2md
 
-Real-time dictation in your terminal. You speak and the text shows up as you talk. When you
-stop, a local LLM (via [Ollama](https://ollama.com)) fixes spelling and grammar and formats
-everything as a clean Markdown document, saved to a file named after the session's start time.
+**Talk. Get a clean Markdown doc.** mic2md turns live speech into polished, structured notes —
+entirely on your Mac, entirely local by default.
 
-By default everything runs **locally**: [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
-(GPU-accelerated with Metal on Apple Silicon) for speech recognition and Ollama for the editing.
-No audio or text leaves your machine. If you choose `--backend claude` or `--backend copilot`
-instead, the transcript text (never the audio) is sent to that cloud service.
+Speak, and the words appear on screen as you talk, live. Stop, and a local LLM straightens out
+the grammar, adds headings and turns your rambling into a document you'd actually want to read
+— titled, tagged, and dropped into a dated folder with an always-up-to-date index. No cloud
+required, no typing required.
 
 ```
 $ mic2md --transcript
@@ -32,6 +31,28 @@ Index updated: ~/Documents/mic2md/index.md
 ───────────────────────────────────────────────────────────────────────
 ✔ Saved ~/Documents/mic2md/transcripts/2026-09/2026-09-23T20-15-30.md
 ```
+
+## Why mic2md
+
+- **Nothing leaves your machine, by default.** Speech recognition
+  ([whisper.cpp](https://github.com/ggml-org/whisper.cpp), GPU-accelerated with Metal on Apple
+  Silicon) and editing ([Ollama](https://ollama.com)) both run locally. Opt in to `--backend
+  claude` or `--backend copilot` only if you want cloud editing — even then, only the text is
+  sent, never the audio.
+- **You never lose what you said.** Every finished sentence is written to disk the instant you
+  say it, so a crash or a closed terminal can't cost you the recording. The polish pass only
+  ever replaces text with a rewritten version of itself.
+- **It reads like someone took real notes.** Not a wall of transcript — a title, headings,
+  bullet points, and (with `summarize`) an executive summary, decisions, action items with
+  owners, and open questions.
+- **It knows what meeting you're in.** On macOS, mic2md checks your calendar and stamps the
+  meeting name and attendees into the file automatically — and feeds them to Whisper so names
+  are spelled right while you talk.
+- **It gets smarter about your vocabulary.** A glossary of names and jargon primes both the
+  speech model and the LLM, so it stops mangling the product names and people you say every day.
+- **It organizes itself.** Sessions land in dated folders with topic tags and a standing
+  `index.md` — browsable straight in Obsidian or any Markdown viewer, no extra tooling.
+- **English and Swedish**, out of the box.
 
 ## Features
 
@@ -93,22 +114,6 @@ Index updated: ~/Documents/mic2md/index.md
 - **Pipe-friendly.** The UI is written to stderr and the final document to stdout, so
   `mic2md | pbcopy` works.
 
-## Quick start
-
-See **[INSTALL.md](INSTALL.md)** for full setup. Short version (macOS):
-
-```bash
-brew install uv ollama
-ollama serve &                 # or start the Ollama app
-ollama pull qwen3.5:9b
-uv tool install /path/to/mic2md
-mic2md                         # English
-mic2md --lang sv               # Swedish
-```
-
-Press **Ctrl+C** to stop recording. Press Ctrl+C again during polishing to skip it and keep
-the raw transcript.
-
 ## Usage
 
 ```bash
@@ -148,7 +153,8 @@ e.g. `mic2md -d 3 summarize`.
 
 ### Commands
 
-Without a command, `mic2md` records. `p` and `s` are short for `polish` and `summarize`.
+Without a command, `mic2md` records, polishes and summarizes. `p` and `s` are short for
+`polish` and `summarize`.
 
 | Command | Description |
 |---|---|
@@ -267,10 +273,27 @@ Ctrl+C ─▶ flush last words ─▶ LLM polish (streamed) ─▶ LLM tags ─�
 - The calendar lookup only works on macOS. Elsewhere it's skipped with a warning and you're
   asked for the meeting instead.
 
+## Quick start
+
+See **[INSTALL.md](INSTALL.md)** for full setup. Short version (macOS):
+
+```bash
+brew install uv ollama
+ollama serve &                 # or start the Ollama app
+ollama pull qwen3.5:9b
+uv tool install /path/to/mic2md
+mic2md                         # English
+mic2md --lang sv               # Swedish
+```
+
+Press **Ctrl+C** to stop recording. Press Ctrl+C again during polishing to skip it and keep
+the raw transcript.
+
 ## Development
 
 Source: <https://github.com/mcyrrer/mic2md>. See [CLAUDE.md](CLAUDE.md) for architecture
-and conventions. Run `make` to list shortcuts (`make check`, `make install`, …).
+and conventions, and [docs/](docs/) for the tech stack, architecture, deployment, data flow,
+testing and security write-ups. Run `make` to list shortcuts (`make check`, `make install`, …).
 
 ```bash
 uv sync
