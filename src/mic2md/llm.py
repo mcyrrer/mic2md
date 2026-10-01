@@ -100,6 +100,9 @@ Rules:
 - If the transcript has times like `[00:12:31]` or `(00:12:31)`, add the time where a decision \
 or action item was discussed, e.g. "(00:12:31)" in the Context/notes column.
 - If the transcript is unclear or the speaker can't be identified, flag it with "[unclear]".
+- Notes inside <notes> were typed by the user during the meeting; they were not said aloud. \
+Treat them as reliable context (e.g. an owner, a deadline or a decision the transcript leaves \
+unclear) and include what they add, but don't quote them as something a speaker said.
 - Ignore small talk, filler words, and off-topic tangents.
 - Keep it concise. Someone who wasn't in the meeting should understand the result in under \
 2 minutes.
@@ -208,6 +211,7 @@ def build_summary_messages(
     meeting: str = "",
     participants: str = "",
     terms: list[str] | None = None,
+    notes: list[str] | None = None,
 ) -> list[dict[str, str]]:
     lang = LANGUAGE_NAMES.get(language, language)
     context = ""
@@ -219,9 +223,20 @@ def build_summary_messages(
         {"role": "system", "content": SUMMARY_PROMPT.format(language=lang) + terms_rule(terms)},
         {
             "role": "user",
-            "content": f"{context}Transcript:\n\n<transcript>\n{transcript}\n</transcript>",
+            "content": f"{context}Transcript:\n\n<transcript>\n{transcript}\n</transcript>"
+            + notes_block(notes),
         },
     ]
+
+
+def notes_block(notes: list[str] | None) -> str:
+    """The user's typed notes for the summary request (empty without notes)."""
+    if not notes:
+        return ""
+    return (
+        "\n\nNotes the user typed during the meeting (times are into the recording):\n\n"
+        "<notes>\n" + "\n".join(notes) + "\n</notes>"
+    )
 
 
 def build_tags_messages(
@@ -308,9 +323,13 @@ def summarize(
     timeout: float = 600.0,
     backend: str = OLLAMA,
     terms: list[str] | None = None,
+    notes: list[str] | None = None,
 ) -> str:
-    """Stream meeting notes (summary, decisions, action items…) for ``transcript``."""
-    messages = build_summary_messages(transcript, language, meeting, participants, terms)
+    """Stream meeting notes (summary, decisions, action items…) for ``transcript``.
+
+    ``notes`` are what the user typed while recording, as ``[HH:MM:SS] text`` lines.
+    """
+    messages = build_summary_messages(transcript, language, meeting, participants, terms, notes)
     return chat(messages, model, url, on_token, timeout, backend)
 
 

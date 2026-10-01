@@ -21,6 +21,15 @@ _SUMMARY_SECTION = re.compile(
     re.S,
 )
 _TRANSCRIPT_HEADING = re.compile(r"\A\s*# Transcript [^\n]*\n")
+NOTES_OPEN = "<!-- mic2md:notes -->"
+NOTES_CLOSE = "<!-- /mic2md:notes -->"
+_NOTES_SECTION = re.compile(r"\s*<!-- mic2md:notes -->\n?(.*?)\n?<!-- /mic2md:notes -->\s*", re.S)
+NOTES_HEADINGS = {"en": "Notes", "sv": "Anteckningar"}
+# A typed note in the raw transcript, before the session was finalized (e.g. after a crash).
+NOTE_MARK = "NOTE:"
+_RAW_NOTE = re.compile(r"^\[(\d\d:\d\d:\d\d)\] NOTE: (.*)$", re.M)
+# One note in a finished notes block: "- **HH:MM:SS** text" (time optional).
+_NOTE_ITEM = re.compile(r"^- (?:\*\*(\d\d:\d\d:\d\d)\*\* )?(.*)$", re.M)
 
 
 _SLUG_CHARS = re.compile(r"[^A-Za-z0-9]+")
@@ -77,14 +86,37 @@ def split_front_matter(text: str) -> tuple[dict[str, str], str]:
     return meta, text[m.end() :]
 
 
+def format_notes(notes: list[str], language: str) -> str:
+    """The notes block for the end of a document; ``notes`` are ``[HH:MM:SS] text`` lines."""
+    items = []
+    for note in notes:
+        m = re.match(r"\[(\d\d:\d\d:\d\d)\] (.*)", note, re.S)
+        items.append(f"- **{m[1]}** {m[2]}" if m else f"- {note}")
+    heading = NOTES_HEADINGS.get(language, NOTES_HEADINGS["en"])
+    return f"{NOTES_OPEN}\n## {heading}\n\n" + "\n".join(items) + f"\n{NOTES_CLOSE}\n"
+
+
+def extract_notes(text: str) -> list[str]:
+    """Typed notes as ``[HH:MM:SS] text`` lines, from a notes block or raw ``NOTE:`` lines."""
+    if m := _NOTES_SECTION.search(text):
+        return [
+            f"[{t}] {note}" if t else note
+            for t, note in _NOTE_ITEM.findall(m.group(1))
+            if note.strip()
+        ]
+    return [f"[{t}] {note}" for t, note in _RAW_NOTE.findall(text)]
+
+
 def parse_document(text: str) -> tuple[dict[str, str], str]:
     """Split a session file into (front matter, transcript).
 
     The transcript is the raw text when the file still has it, otherwise the polished body.
-    A summary block added by ``summarize`` is never part of it.
+    A summary block added by ``summarize`` and typed notes are never part of it.
     """
     meta, body = split_front_matter(text)
     body = _SUMMARY_SECTION.sub("", body, count=1)
+    body = _NOTES_SECTION.sub("\n", body, count=1)
+    body = re.sub(r"\n*" + _RAW_NOTE.pattern + r"\n?", "\n", body, flags=re.M)
     if m := _RAW_SECTION.search(body):
         return meta, m.group(1).strip()
     return meta, _TRANSCRIPT_HEADING.sub("", body).strip()
@@ -110,6 +142,8 @@ class SessionWriter:
             **(extra_meta or {}),
         }
         self.lines: list[str] = []
+        # Typed notes, "[HH:MM:SS] text"; kept apart so raw_text is speech only.
+        self.notes: list[str] = []
         self.path.parent.mkdir(parents=True, exist_ok=True)
         heading = f"# Transcript {self.started:%Y-%m-%d %H:%M}\n\n"
         self.path.write_text(render_front_matter(self.meta) + "\n" + heading, encoding="utf-8")
@@ -126,14 +160,22 @@ class SessionWriter:
         with self.path.open("a", encoding="utf-8") as fh:
             fh.write(text + "\n\n")
 
+    def append_note(self, text: str, at: float | None = None) -> None:
+        """Add a typed note; it goes to the file right away, marked so it isn't speech."""
+        text = " ".join(text.split())
+        stamp = format_duration(timedelta(seconds=at or 0))
+        self.notes.append(f"[{stamp}] {text}")
+        with self.path.open("a", encoding="utf-8") as fh:
+            fh.write(f"[{stamp}] {NOTE_MARK} {text}\n\n")
+
     def finalize(self, polished: str | None, llm_model: str | None, ended: datetime) -> None:
         self.meta["duration"] = format_duration(ended.astimezone() - self.started)
         if polished and llm_model:
             self.meta["llm_model"] = llm_model
-        write_final(self.path, self.meta, self.raw_text, polished)
+        write_final(self.path, self.meta, self.raw_text, polished, notes=self.notes)
 
     def discard_if_empty(self) -> bool:
-        if not self.lines:
+        if not self.lines and not self.notes:
             self.path.unlink(missing_ok=True)
             return True
         return False
@@ -191,6 +233,7 @@ def write_final(
     raw: str,
     polished: str | None,
     summary: str | None = None,
+    notes: list[str] | None = None,
 ) -> None:
     content = render_front_matter(meta) + "\n"
     if summary:
@@ -200,6 +243,8 @@ def write_final(
     else:
         started = meta.get("date", "")[:16].replace("T", " ")
         content += f"# Transcript {started}\n\n" + raw + "\n"
+    if notes:
+        content += "\n" + format_notes(notes, meta.get("language", "en"))
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(content, encoding="utf-8")
     tmp.replace(path)
