@@ -1,16 +1,15 @@
 # mic2md
 
-Real-time dictation in your terminal. You speak and the text shows up as you talk. When you
-stop, a local LLM (via [Ollama](https://ollama.com)) fixes spelling and grammar and formats
-everything as a clean Markdown document, saved to a file named after the session's start time.
+**Talk. Get a clean Markdown doc.** mic2md turns live speech into polished, structured notes —
+entirely on your Mac, entirely local by default.
 
-By default everything runs **locally**: [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
-(GPU-accelerated with Metal on Apple Silicon) for speech recognition and Ollama for the editing.
-No audio or text leaves your machine. If you choose `--backend claude` or `--backend copilot`
-instead, the transcript text (never the audio) is sent to that cloud service.
+Speak, and the words appear on screen as you talk, live. Stop, and a local LLM straightens out
+the grammar, adds headings and turns your rambling into a document you'd actually want to read
+— titled, tagged, and dropped into a dated folder with an always-up-to-date index. No cloud
+required, no typing required.
 
 ```
-$ mic2md
+$ mic2md --transcript
 Meeting: Release planning
 Saving to ~/Documents/mic2md/transcripts/2026-09/2026-09-23T20-15-30.md
 ───────────────────────────── ● Listening ─────────────────────────────
@@ -33,11 +32,34 @@ Index updated: ~/Documents/mic2md/index.md
 ✔ Saved ~/Documents/mic2md/transcripts/2026-09/2026-09-23T20-15-30.md
 ```
 
+## Why mic2md
+
+- **Nothing leaves your machine, by default.** Speech recognition
+  ([whisper.cpp](https://github.com/ggml-org/whisper.cpp), GPU-accelerated with Metal on Apple
+  Silicon) and editing ([Ollama](https://ollama.com)) both run locally. Opt in to `--backend
+  claude` or `--backend copilot` only if you want cloud editing — even then, only the text is
+  sent, never the audio.
+- **You never lose what you said.** Every finished sentence is written to disk the instant you
+  say it, so a crash or a closed terminal can't cost you the recording. The polish pass only
+  ever replaces text with a rewritten version of itself.
+- **It reads like someone took real notes.** Not a wall of transcript — a title, headings,
+  bullet points, and (with `summarize`) an executive summary, decisions, action items with
+  owners, and open questions.
+- **It knows what meeting you're in.** On macOS, mic2md checks your calendar and stamps the
+  meeting name and attendees into the file automatically — and feeds them to Whisper so names
+  are spelled right while you talk.
+- **It gets smarter about your vocabulary.** A glossary of names and jargon primes both the
+  speech model and the LLM, so it stops mangling the product names and people you say every day.
+- **It organizes itself.** Sessions land in dated folders with topic tags and a standing
+  `index.md` — browsable straight in Obsidian or any Markdown viewer, no extra tooling.
+- **English and Swedish**, out of the box.
+
 ## Features
 
 - **Live transcription.** A grey partial line updates several times a second while you speak
   (a fast Whisper pass that only encodes the audio so far).
-  Each sentence is committed as soon as you pause.
+  Each sentence is committed as soon as you pause. Pass `--transcript`/`-t` to also print each
+  finished sentence to the terminal as it's saved.
 - **Neural speech detection.** [Silero VAD](https://github.com/snakers4/silero-vad) decides
   when you're speaking, so fans, typing and room noise don't start or cut off sentences.
   `--vad energy` switches to a simple loudness threshold instead.
@@ -95,28 +117,13 @@ Index updated: ~/Documents/mic2md/index.md
   `tag`, so don't edit it by hand. Run `mic2md reindex` to rebuild it yourself (this also moves
   sessions saved by older versions into the month folders).
 - **ISO 8601 file names**, e.g. `2026-09-23T20-15-30.md`, so files sort chronologically.
-  Colons are replaced with `-` because they aren't valid in filenames on all systems.
+  Colons are replaced with `-` because they aren't valid in filenames on all systems. When a
+  meeting title is known, it's added as a short slug, e.g. `2026-09-23T20-15-30-release-planning.md`.
 - **English and Swedish.** English uses OpenAI Whisper `large-v3-turbo`. Swedish uses
   [KB-Whisper](https://huggingface.co/KBLab) from the National Library of Sweden.
 - **Models download automatically** on first use.
 - **Pipe-friendly.** The UI is written to stderr and the final document to stdout, so
   `mic2md | pbcopy` works.
-
-## Quick start
-
-See **[INSTALL.md](INSTALL.md)** for full setup. Short version (macOS):
-
-```bash
-brew install uv ollama
-ollama serve &                 # or start the Ollama app
-ollama pull qwen3.5:9b
-uv tool install /path/to/mic2md
-mic2md                         # English
-mic2md --lang sv               # Swedish
-```
-
-Press **Ctrl+C** to stop recording. Press Ctrl+C again during polishing to skip it and keep
-the raw transcript.
 
 ## Usage
 
@@ -157,7 +164,8 @@ e.g. `mic2md -d 3 summarize`.
 
 ### Commands
 
-Without a command, `mic2md` records. `p` and `s` are short for `polish` and `summarize`.
+Without a command, `mic2md` records, polishes and summarizes. `p` and `s` are short for
+`polish` and `summarize`.
 
 | Command | Description |
 |---|---|
@@ -184,6 +192,7 @@ Without a command, `mic2md` records. `p` and `s` are short for `polish` and `sum
 | `--ollama-url` | `OLLAMA_HOST` | `http://localhost:11434` | Ollama server |
 | `-o, --output-dir` | `MIC2MD_OUTPUT_DIR` | `~/Documents/mic2md` | Holds `index.md` and `transcripts/YYYY-MM/` |
 | `-d, --device` | `MIC2MD_DEVICE` | system default | Microphone ID or name |
+| `-t, --transcript` | | off | Print each finished sentence to the terminal as it's committed (the live partial line always shows) |
 | `--vad` | `MIC2MD_VAD` | `silero` | Speech detection: `silero` (neural) or `energy` (loudness threshold) |
 | `--beam-size` | `MIC2MD_BEAM_SIZE` | `5` | Beam search width for finished sentences; `1` = greedy (a bit faster) |
 | `--silence-ms` | | `700` | Pause length that ends a sentence |
@@ -277,10 +286,27 @@ Ctrl+C ─▶ flush last words ─▶ LLM polish (streamed) ─▶ LLM tags ─�
 - The calendar lookup only works on macOS. Elsewhere it's skipped with a warning and you're
   asked for the meeting instead.
 
+## Quick start
+
+See **[INSTALL.md](INSTALL.md)** for full setup. Short version (macOS):
+
+```bash
+brew install uv ollama
+ollama serve &                 # or start the Ollama app
+ollama pull qwen3.5:9b
+uv tool install /path/to/mic2md
+mic2md                         # English
+mic2md --lang sv               # Swedish
+```
+
+Press **Ctrl+C** to stop recording. Press Ctrl+C again during polishing to skip it and keep
+the raw transcript.
+
 ## Development
 
 Source: <https://github.com/mcyrrer/mic2md>. See [CLAUDE.md](CLAUDE.md) for architecture
-and conventions. Run `make` to list shortcuts (`make check`, `make install`, …).
+and conventions, and [docs/](docs/) for the tech stack, architecture, deployment, data flow,
+testing and security write-ups. Run `make` to list shortcuts (`make check`, `make install`, …).
 
 ```bash
 uv sync

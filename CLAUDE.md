@@ -27,8 +27,9 @@ uv tool install --reinstall .         # install/update the global `mic2md` comma
 
 ```
 src/mic2md/
-  cli.py          Typer app. `main` (record), `polish FILE` (alias `p`), `summarize [FILE]`
-                  (alias `s`), `tag`, `reindex`, `models`. Recorder class = main loop.
+  cli.py          Typer app. `main` (record + summarize, via `ctx.invoke(summarize)`),
+                  `polish FILE` (alias `p`), `summarize [FILE]` (alias `s`), `tag`, `reindex`,
+                  `models`. Recorder class = main loop.
   audio.py        MicStream (sounddevice → queue of 30 ms float32 frames) + Segmenter (utterances;
                   speech decided by a detector, or an energy threshold without one)
   vad.py          SileroDetector (pysilero-vad): 30 ms frames → 512-sample chunks, hysteresis
@@ -77,10 +78,13 @@ lauche.sh         Legacy record-then-transcribe script (predecessor, kept for re
   (never edited incrementally) after each recording and by `mic2md reindex`. It has a
   table per month (with tags), a `## Tags` section (tag → notes) and a footer linking
   `REPO_URL` (`mic2md/__init__.py`).
-- **summarize without FILE** records first: `_record_for_summary` → `_record` (the same
-  record/polish/save flow as `main`, with `tag=False` so tagging happens once, in summarize).
+- **Bare `mic2md` always summarizes**: `main` sets `ctx.obj[RECORD_KEY]` then
+  `ctx.invoke(summarize, ctx, ...)` with no `file`, so plain recording and `summarize` (no
+  FILE) are the same code path. `summarize` without FILE records first: `_record_for_summary`
+  → `_record` (record/polish/save, with `tag=False` so tagging happens once, in summarize).
   Recording options come from the top-level callback via `ctx.obj[RECORD_KEY]`
-  (`RecordOptions`). A failed polish skips the summary; `--no-llm` is rejected.
+  (`RecordOptions`). A failed polish skips the summary; `--no-llm` is rejected. There is no
+  record-only path left in the CLI other than `--no-llm` on `polish`/import flows.
 - **Summary block**: `summarize` writes its output between `<!-- mic2md:summary -->` and
   `<!-- /mic2md:summary -->` right after the front matter, followed by `---`. The parser also
   accepts the older `voice2text:summary` markers from before the rename.
@@ -119,7 +123,10 @@ lauche.sh         Legacy record-then-transcribe script (predecessor, kept for re
   `writer.import_document`, which copies it into `transcripts/YYYY-MM/` under a free
   session name. The source file is never modified.
 - **File names** come from `writer.session_filename`: `%Y-%m-%dT%H-%M-%S.md`, ISO 8601 with
-  `-` instead of `:`. Front matter is flat `key: value` lines. `parse_document` depends on
+  `-` instead of `:`, plus a `-<slug>` suffix (`slugify_title`, lowercase-hyphenated, max 20
+  chars) when a meeting title is known. `index._SESSION_NAME` and `migrate_flat` must accept
+  both the bare and suffixed forms. Front matter is flat `key: value` lines. `parse_document`
+  depends on
   that format. It still reads the `<summary>Raw transcript</summary>` section that older
   polished files have; newer files contain only the polished body.
 - **Models**: add new ones only through `models.REGISTRY`. KBLab repos all use the remote
@@ -177,3 +184,12 @@ lauche.sh         Legacy record-then-transcribe script (predecessor, kept for re
 - Manual end-to-end test without talking: generate speech with
   `say -o x.aiff "…"; sox x.aiff -r 16000 -c 1 -b 16 x.wav` and feed the frames to
   `Recorder.process` through a fake mic queue.
+- **Debugging resource usage of a running session**: find the pid with
+  `ps aux | grep -E "mic2md|ollama"`, then `ps -o pid,%cpu,%mem,rss,vsz,etime,command -p <pid>`
+  for CPU/RSS (VSZ is inflated by Metal's address-space reservation — ignore it). Ollama
+  only shows load during the one-shot polish/tag calls after Ctrl+C; idle 0% CPU / low RSS is
+  normal while recording. For live Metal GPU load, `sudo powermetrics --samplers gpu_power -n 1`
+  needs a real TTY for the password; without one, read
+  `ioreg -l | grep PerformanceStatistics` for `Device Utilization %` and in-use GPU memory
+  instead — no sudo required. High (~80-90%) GPU utilization while dictating is expected:
+  `maybe_partial()` re-runs the Metal encoder every ≥0.3 s during speech.

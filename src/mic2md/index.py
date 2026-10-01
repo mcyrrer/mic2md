@@ -9,10 +9,10 @@ from datetime import datetime
 from pathlib import Path
 
 from mic2md import REPO_URL
-from mic2md.writer import TRANSCRIPTS_DIR, parse_document, parse_tags, session_path
+from mic2md.writer import TRANSCRIPTS_DIR, parse_document, parse_tags
 
 INDEX_FILE = "index.md"
-_SESSION_NAME = re.compile(r"\A\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.md\Z")
+_SESSION_NAME = re.compile(r"\A(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})(?:-[a-z0-9-]+)?\.md\Z")
 
 
 @dataclass
@@ -27,7 +27,7 @@ def _started(meta: dict[str, str], path: Path) -> datetime:
     try:
         return datetime.fromisoformat(meta["date"])
     except (KeyError, ValueError):
-        return datetime.strptime(path.stem, "%Y-%m-%dT%H-%M-%S")
+        return datetime.strptime(_SESSION_NAME.match(path.name).group(1), "%Y-%m-%dT%H-%M-%S")
 
 
 def collect(output_dir: Path) -> list[Entry]:
@@ -130,10 +130,11 @@ def migrate_flat(output_dir: Path) -> list[Path]:
     """Move session files saved directly in the output folder (older versions) into place."""
     moved = []
     for path in sorted(output_dir.glob("*.md")):
-        if not _SESSION_NAME.match(path.name):
+        m = _SESSION_NAME.match(path.name)
+        if not m:
             continue
-        started = datetime.strptime(path.stem, "%Y-%m-%dT%H-%M-%S")
-        target = session_path(output_dir, started)
+        started = datetime.strptime(m.group(1), "%Y-%m-%dT%H-%M-%S")
+        target = path.parent / TRANSCRIPTS_DIR / f"{started:%Y-%m}" / path.name
         if target.exists():
             continue
         target.parent.mkdir(parents=True, exist_ok=True)

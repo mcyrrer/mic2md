@@ -32,14 +32,26 @@ _RAW_NOTE = re.compile(r"^\[(\d\d:\d\d:\d\d)\] NOTE: (.*)$", re.M)
 _NOTE_ITEM = re.compile(r"^- (?:\*\*(\d\d:\d\d:\d\d)\*\* )?(.*)$", re.M)
 
 
-def session_filename(started: datetime) -> str:
-    """ISO 8601 timestamp with ``-`` instead of ``:`` so it is valid on every filesystem."""
-    return started.strftime("%Y-%m-%dT%H-%M-%S") + ".md"
+_SLUG_CHARS = re.compile(r"[^A-Za-z0-9]+")
+_TITLE_MAX_LEN = 20
 
 
-def session_path(output_dir: Path, started: datetime) -> Path:
-    """``<output_dir>/transcripts/YYYY-MM/<ISO timestamp>.md``."""
-    return output_dir / TRANSCRIPTS_DIR / f"{started:%Y-%m}" / session_filename(started)
+def slugify_title(title: str) -> str:
+    """Lowercase-hyphenated, max 20 chars; empty if ``title`` has no word characters."""
+    slug = _SLUG_CHARS.sub("-", title.strip()).strip("-").lower()
+    return slug[:_TITLE_MAX_LEN].rstrip("-")
+
+
+def session_filename(started: datetime, title: str = "") -> str:
+    """ISO 8601 timestamp (``-`` instead of ``:``) plus an optional ``-<slug>`` suffix."""
+    slug = slugify_title(title)
+    suffix = f"-{slug}" if slug else ""
+    return started.strftime("%Y-%m-%dT%H-%M-%S") + suffix + ".md"
+
+
+def session_path(output_dir: Path, started: datetime, title: str = "") -> Path:
+    """``<output_dir>/transcripts/YYYY-MM/<ISO timestamp>[-<title slug>].md``."""
+    return output_dir / TRANSCRIPTS_DIR / f"{started:%Y-%m}" / session_filename(started, title)
 
 
 def format_duration(td: timedelta) -> str:
@@ -122,7 +134,7 @@ class SessionWriter:
         extra_meta: dict[str, str] | None = None,
     ) -> None:
         self.started = started.astimezone()
-        self.path = session_path(output_dir, self.started)
+        self.path = session_path(output_dir, self.started, (extra_meta or {}).get("meeting", ""))
         self.meta = {
             "date": self.started.isoformat(timespec="seconds"),
             "language": language,
@@ -181,10 +193,11 @@ def import_document(output_dir: Path, started: datetime, meta: dict[str, str], b
     If a session already uses that second, the next free second is taken so the file name
     keeps the session pattern (and shows up in the index).
     """
-    path = session_path(output_dir, started)
+    title = meta.get("meeting", "")
+    path = session_path(output_dir, started, title)
     while path.exists():
         started += timedelta(seconds=1)
-        path = session_path(output_dir, started)
+        path = session_path(output_dir, started, title)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(render_front_matter(meta) + "\n" + body.strip() + "\n", encoding="utf-8")
