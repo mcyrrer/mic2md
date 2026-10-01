@@ -635,3 +635,53 @@ def test_failed_llm_pass_inside_fullscreen_is_logged(monkeypatch):
         assert cli._stream_llm("polishing", cli.Backend.ollama, "q", "u", call, "kept") is None
     assert view.tasks[0].status == "failed"
     assert "Polishing failed, kept" in view.log[-1].plain
+
+
+def _two_meetings():
+    from datetime import datetime
+
+    from mic2md.meetings import Meeting
+
+    return [
+        Meeting(
+            "Standup", ["Ada", "Bob"], datetime(2026, 10, 1, 10), datetime(2026, 10, 1, 10, 30)
+        ),
+        Meeting("Workshop", [], datetime(2026, 10, 1, 9), datetime(2026, 10, 1, 12)),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("answers", "expected"),
+    [([""], "Standup"), (["2"], "Workshop"), (["x", "9", "2"], "Workshop"), (["0"], None)],
+)
+def test_choose_meeting_asks_when_several_are_scheduled(monkeypatch, answers, expected):
+    from mic2md import cli
+
+    replies = iter(answers)
+    printed = []
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cli.console, "input", lambda prompt: next(replies))
+    monkeypatch.setattr(cli.console, "print", lambda obj="", **k: printed.append(str(obj)))
+    chosen = cli._choose_meeting(_two_meetings())
+    assert (chosen.title if chosen else None) == expected
+    assert any("10:00–10:30  Standup  (2 people)" in p for p in printed)
+
+
+def test_choose_meeting_without_a_terminal_takes_the_latest(monkeypatch):
+    from mic2md import cli
+
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(cli.console, "print", lambda *a, **k: None)
+    assert cli._choose_meeting(_two_meetings()).title == "Standup"
+    assert cli._choose_meeting([]) is None
+
+
+def test_meeting_meta_none_of_these_asks_for_a_name(monkeypatch):
+    from mic2md import cli, meetings
+
+    replies = iter(["0", "Planning", "Ada, Bob"])
+    monkeypatch.setattr(meetings, "current_meetings", _two_meetings)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cli.console, "input", lambda prompt: next(replies))
+    monkeypatch.setattr(cli.console, "print", lambda *a, **k: None)
+    assert cli._meeting_meta() == {"meeting": "Planning", "participants": "Ada, Bob"}

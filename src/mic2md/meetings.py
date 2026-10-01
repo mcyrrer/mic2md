@@ -19,6 +19,8 @@ class CalendarError(Exception):
 class Meeting:
     title: str
     participants: list[str] = field(default_factory=list)
+    start: datetime | None = None
+    end: datetime | None = None
 
 
 def one_line(text: str) -> str:
@@ -34,17 +36,33 @@ def participant_label(name: str | None, url: str | None) -> str:
     return one_line(url.removeprefix("mailto:"))
 
 
-def pick_current(events: list, now: datetime, grace_s: float = GRACE_S) -> object | None:
-    """Timed events in progress or starting within ``grace_s``; the one starting last wins."""
+def _start(event) -> float:
+    return event.startDate().timeIntervalSince1970()
+
+
+def _end(event) -> float:
+    return event.endDate().timeIntervalSince1970()
+
+
+def current_events(events: list, now: datetime, grace_s: float = GRACE_S) -> list:
+    """Timed events in progress or starting within ``grace_s``, the one starting last first.
+
+    The same meeting shown in several calendars (same title and times) is listed once.
+    """
     ts = now.timestamp()
-    current = [
-        e
-        for e in events
-        if not e.isAllDay()
-        and e.startDate().timeIntervalSince1970() <= ts + grace_s
-        and ts < e.endDate().timeIntervalSince1970()
-    ]
-    return max(current, key=lambda e: e.startDate().timeIntervalSince1970(), default=None)
+    current, seen = [], set()
+    for e in sorted(events, key=_start, reverse=True):
+        key = (one_line(e.title() or ""), _start(e), _end(e))
+        if e.isAllDay() or not _start(e) <= ts + grace_s or not ts < _end(e) or key in seen:
+            continue
+        seen.add(key)
+        current.append(e)
+    return current
+
+
+def pick_current(events: list, now: datetime, grace_s: float = GRACE_S) -> object | None:
+    """The default meeting: the current one that started last."""
+    return next(iter(current_events(events, now, grace_s)), None)
 
 
 def _request_access(store) -> bool:
@@ -71,8 +89,31 @@ def _request_access(store) -> bool:
     return result["granted"]
 
 
+def to_meeting(event) -> Meeting:
+    participants = []
+    for p in event.attendees() or []:
+        url = p.URL()
+        label = participant_label(p.name(), url.absoluteString() if url else None)
+        if label and label not in participants:
+            participants.append(label)
+    return Meeting(
+        title=one_line(event.title() or ""),
+        participants=participants,
+        start=datetime.fromtimestamp(_start(event)),
+        end=datetime.fromtimestamp(_end(event)),
+    )
+
+
 def current_meeting(now: datetime | None = None) -> Meeting | None:
-    """Return the meeting in progress, or None. Raises CalendarError if access is unavailable."""
+    """The meeting in progress that started last, or None (see ``current_meetings``)."""
+    return next(iter(current_meetings(now)), None)
+
+
+def current_meetings(now: datetime | None = None) -> list[Meeting]:
+    """Meetings in progress (or about to start), the one starting last first.
+
+    Raises CalendarError if access is unavailable.
+    """
     try:
         import EventKit
         from Foundation import NSDate
@@ -93,13 +134,5 @@ def current_meeting(now: datetime | None = None) -> Meeting | None:
         NSDate.dateWithTimeIntervalSince1970_(ts + GRACE_S + 60),
         None,
     )
-    event = pick_current(list(store.eventsMatchingPredicate_(predicate) or []), now)
-    if event is None:
-        return None
-    participants = []
-    for p in event.attendees() or []:
-        url = p.URL()
-        label = participant_label(p.name(), url.absoluteString() if url else None)
-        if label and label not in participants:
-            participants.append(label)
-    return Meeting(title=one_line(event.title() or ""), participants=participants)
+    events = current_events(list(store.eventsMatchingPredicate_(predicate) or []), now)
+    return [to_meeting(e) for e in events]

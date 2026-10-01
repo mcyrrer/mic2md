@@ -84,7 +84,9 @@ Index updated: ~/Documents/mic2md/index.md
   away, so a crash or closed terminal doesn't lose what you said.
 - **Meeting detection.** When recording starts, mic2md checks the macOS Calendar for a
   meeting that is in progress or starts within 5 minutes, and saves its title and attendees
-  as `meeting:` and `participants:` in the front matter. If there is no meeting, you're asked
+  as `meeting:` and `participants:` in the front matter. If several meetings overlap, you pick
+  one from a numbered list (Enter takes the one that started last, `0` none of them; without a
+  terminal the one that started last is used). If there is no meeting, you're asked
   for a name and participants (only in an interactive terminal; press Enter to skip). The first
   run asks for Calendar access. Turn this off with `--no-calendar`.
 - **Glossary for names and jargon.** The meeting title, the participants and the terms in
