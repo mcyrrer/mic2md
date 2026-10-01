@@ -5,6 +5,7 @@ from __future__ import annotations
 import queue
 import sys
 import time
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -16,15 +17,16 @@ import typer
 from rich.console import Console
 from rich.live import Live
 from rich.markup import escape
+from rich.rule import Rule
 from rich.table import Table
-from rich.text import Text
 
-from mic2md import __version__, index, llm, models
+from mic2md import __version__, index, keys, llm, models
 from mic2md.audio import SAMPLE_RATE, MicStream, Segmenter, list_input_devices
 from mic2md.transcriber import build_vocabulary, mark_uncertain, read_glossary
-from mic2md.ui import LiveView, highlight_uncertain
+from mic2md.ui import LiveView, LlmProgress, highlight_uncertain
 from mic2md.writer import (
     SessionWriter,
+    extract_notes,
     extract_summary,
     format_tags,
     import_document,
@@ -201,26 +203,100 @@ def _update_index(output_dir: Path) -> None:
     try:
         path = index.update(output_dir)
     except OSError as e:
-        console.print(f"[yellow]⚠ Could not update the index:[/] {e}")
+        _say(f"[yellow]⚠ Could not update the index:[/] {e}")
         return
-    console.print(f"[dim]Index updated: {path}[/]", highlight=False, soft_wrap=True)
+    _say(f"[dim]Index updated: {path}[/]", highlight=False, soft_wrap=True)
 
 
-class LlmProgress:
-    """Spinner text for an Ollama pass; re-rendered by the spinner, so elapsed time ticks."""
+class Screen:
+    """Keeps the fullscreen view on the alternate screen from recording through the LLM passes.
 
-    def __init__(self, task: str, label: str) -> None:
-        self.task, self.label = task, label
-        self.chars = 0
-        self.started = time.monotonic()
+    While it is up nothing may print: messages (``_say``) go to the view's log, LLM output to
+    its transcript panel, and both are replayed into the scrollback when it closes.
+    """
 
-    def __rich__(self) -> Text:
-        elapsed = int(time.monotonic() - self.started)
-        if self.chars == 0:
-            return Text(f"Waiting for {self.label} (loading, reading the text)… {elapsed}s")
-        return Text(
-            f"{self.task.capitalize()} with {self.label}… {self.chars:,} characters · {elapsed}s"
+    def __init__(self, view: LiveView) -> None:
+        self.view = view
+        # (renderable, console.print kwargs) to print once the alternate screen is gone.
+        self.replay: list[tuple[object, dict]] = []
+        self._stack = ExitStack()
+        self.keys: keys.KeyReader | None = None
+
+    def __enter__(self) -> Screen:
+        global _screen
+        self.keys = self._stack.enter_context(keys.KeyReader())
+        self._stack.enter_context(
+            Live(self.view, console=console, refresh_per_second=10, screen=True)
         )
+        _screen = self
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        global _screen
+        _screen = None
+        self._stack.close()
+        for obj, kwargs in self.replay:
+            console.print(obj, **kwargs)
+
+    def handle_keys(self) -> None:
+        """`m` toggles the matrix rain; everything else is ignored after recording."""
+        for key in self.keys.read() if self.keys else []:
+            if key in ("m", "M"):
+                self.view.toggle_matrix()
+
+    def run_llm(self, progress: LlmProgress, call, fallback: str, quiet: bool):
+        """``_stream_llm`` inside the view: the step in the sidebar, the text in the panel."""
+        view = self.view
+        view.tasks.append(progress)
+        title = f"{progress.task.capitalize()} with {progress.label}"
+        if not quiet:
+            view.output_title, view.output = title, ""
+
+        def on_token(token: str) -> None:
+            progress.chars += len(token)
+            if not quiet:
+                view.output += token
+            self.handle_keys()
+
+        try:
+            result = call(on_token)
+        except llm.LLMError as e:
+            progress.end("failed")
+            _say(f"[yellow]⚠ {progress.task.capitalize()} failed, {fallback}:[/] {e}")
+            return None
+        except KeyboardInterrupt:
+            progress.end("cancelled")
+            _say(f"[yellow]⚠ {progress.task.capitalize()} cancelled, {fallback}.[/]")
+            return None
+        progress.end("done")
+        if not quiet:
+            self.replay.append((Rule(f"[bold]{escape(title)}[/]", style="magenta"), {}))
+            self.replay.append((view.output.strip(), {"markup": False, "highlight": False}))
+            done = f"[dim]Done in {progress.elapsed():.0f}s ({progress.chars:,} characters).[/]"
+            self.replay.append((done, {}))
+        return result
+
+
+# The fullscreen view while it is up (from recording until the last LLM pass is done).
+_screen: Screen | None = None
+
+
+def _say(obj, **kwargs) -> None:
+    """Print a message, or while the fullscreen view is up, log it there and print it later."""
+    if _screen is None:
+        console.print(obj, **kwargs)
+        return
+    if isinstance(obj, str):
+        _screen.view.log.append(console.render_str(obj, markup=kwargs.get("markup", True)))
+    _screen.replay.append((obj, kwargs))
+
+
+def _later(obj, **kwargs) -> None:
+    """Print ``obj`` now, or once the fullscreen view has closed (without logging it)."""
+    if _screen is None:
+        console.print(obj, **kwargs)
+    else:
+        _screen.replay.append((obj, kwargs))
 
 
 class LineStreamer:
@@ -256,12 +332,14 @@ def _stream_llm(
     try:
         llm.check(url, model, backend=backend.value)
     except llm.LLMError as e:
-        console.print(f"[yellow]⚠ Skipping {task}:[/] {e}")
+        _say(f"[yellow]⚠ Skipping {task}:[/] {e}")
         return None
     label = llm.describe(backend.value, model)
+    progress = LlmProgress(task, label)
+    if _screen is not None:
+        return _screen.run_llm(progress, call, fallback, quiet)
     if not quiet:
         console.rule(f"[bold]{task.capitalize()} with {escape(label)}[/]", style="magenta")
-    progress = LlmProgress(task, label)
     stream = LineStreamer(progress, echo=not quiet)
     try:
         with console.status(progress, spinner="dots"):
@@ -301,7 +379,7 @@ def _run_tags(
         quiet=True,
     )
     if tags:
-        console.print(f"[dim]Tags:[/] {escape(', '.join(tags))}", highlight=False)
+        _say(f"[dim]Tags:[/] {escape(', '.join(tags))}", highlight=False)
     return tags
 
 
@@ -370,6 +448,10 @@ class Recorder:
         self.pending: tuple[np.ndarray, float | None] | None = None
         self._last_partial = 0.0
         self._partial_gap = PARTIAL_INTERVAL_S
+        # True while the fullscreen view owns the terminal; nothing else may print then.
+        self._screen = False
+        # Session clock for typed notes (monotonic time when recording started).
+        self._t0 = time.monotonic()
 
     def commit(self, audio: np.ndarray, start: float | None = None) -> None:
         """Transcribe a finished utterance and save it; ``start`` is seconds into the session."""
@@ -380,11 +462,47 @@ class Recorder:
         self.view.partial = ""
         if text:
             uncertain = getattr(self.transcriber, "last_uncertain", set())
-            if self.show_transcript:
-                console.print(highlight_uncertain(text, uncertain), highlight=False)
+            line = highlight_uncertain(text, uncertain)
+            self.view.add_line(line, start, unsure=len(uncertain))
+            if self.show_transcript and not self._screen:
+                console.print(line, highlight=False)
             self.writer.append(mark_uncertain(text, uncertain), at=start)
             self.context = text
         self.pending = None
+
+    def handle_keys(self, pressed: list[str]) -> None:
+        """`n` opens a note; then Enter saves it, Esc cancels, Backspace/Ctrl+U edit.
+
+        `m` (outside the note editor) toggles the matrix rain behind the transcript.
+        """
+        view = self.view
+        for key in pressed:
+            if view.note is None:
+                if key in ("n", "N"):
+                    view.note, view.note_at = "", time.monotonic() - self._t0
+                elif key in ("m", "M"):
+                    view.toggle_matrix()
+            elif key == keys.ENTER:
+                self.save_note()
+            elif key == keys.ESC:
+                view.note = None
+            elif key == keys.BACKSPACE:
+                view.note = view.note[:-1]
+            elif key == keys.CLEAR:
+                view.note = ""
+            elif len(key) == 1:
+                view.note += key
+
+    def save_note(self) -> None:
+        """Save the note being typed (if it has text) and close the editor."""
+        text, at = (self.view.note or "").strip(), self.view.note_at
+        self.view.note = None
+        if not text:
+            return
+        self.writer.append_note(text, at)
+        line = self.view.add_note(text, at)
+        if self.show_transcript and not self._screen:
+            console.print(line, highlight=False)
 
     def process(self, frames: list[np.ndarray]) -> None:
         for frame in frames:
@@ -393,8 +511,7 @@ class Recorder:
                 self.commit(done, self.seg.last_start_s)
             elif not self.seg.in_speech:
                 self.view.partial = ""
-        self.view.level = self.seg.level
-        self.view.speaking = self.seg.speaking
+        self.view.update_level(self.seg.level, self.seg.speaking)
         self.view.calibrated = self.seg.calibrated
 
     def maybe_partial(self) -> None:
@@ -411,9 +528,36 @@ class Recorder:
         self._partial_gap = max(PARTIAL_INTERVAL_S, 2 * (self._last_partial - now))
 
     def run(self, mic: MicStream) -> None:
-        with Live(self.view, console=console, refresh_per_second=10, transient=True):
+        """Record until Ctrl+C. A fullscreen view stays up afterwards if a ``Screen`` is open
+        (it then shows the LLM passes); otherwise this opens and closes one itself."""
+        fullscreen = self.view.fullscreen
+        self._t0 = time.monotonic()
+        with ExitStack() as stack:
+            if fullscreen and _screen is None:
+                stack.enter_context(Screen(self.view))
+            self._screen = fullscreen
+            try:
+                self._loop(mic)
+            finally:
+                self._screen = False
+                self.view.stop()
+            if fullscreen and self.show_transcript:
+                # Into the scrollback once the alternate screen is gone.
+                for _, line, _ in self.view.lines:
+                    _later(line, highlight=False)
+
+    def _loop(self, mic: MicStream) -> None:
+        with ExitStack() as stack:
+            if _screen is not None:
+                reader = _screen.keys
+            else:
+                reader = stack.enter_context(keys.KeyReader())
+                stack.enter_context(
+                    Live(self.view, console=console, refresh_per_second=10, transient=True)
+                )
             try:
                 while True:
+                    self.handle_keys(reader.read())
                     try:
                         frames = [mic.frames.get(timeout=0.1)]
                     except queue.Empty:
@@ -427,10 +571,16 @@ class Recorder:
 
     def finish(self, mic: MicStream) -> None:
         """Transcribe whatever was still in flight when recording stopped."""
+        self.save_note()  # a note still being typed at Ctrl+C is kept
         leftover = []
         while not mic.frames.empty():
             leftover.append(mic.frames.get_nowait())
-        with console.status("Transcribing the last words…"):
+        if _screen is not None:
+            _screen.view.stage = "Transcribing the last words…"
+            status = ExitStack()
+        else:
+            status = console.status("Transcribing the last words…")
+        with status:
             if self.pending is not None:
                 self.commit(*self.pending)
             for frame in leftover:
@@ -438,6 +588,7 @@ class Recorder:
                     self.commit(done, self.seg.last_start_s)
             if (tail := self.seg.flush()) is not None:
                 self.commit(tail, self.seg.last_start_s)
+        self.view.stage = ""
 
 
 @app.callback(invoke_without_command=True)
@@ -533,9 +684,19 @@ def main(
         typer.Option(
             "--transcript",
             "-t",
-            help="Print the live transcript to the terminal as sentences finish.",
+            help="Print the live transcript to the terminal as sentences finish "
+            "(in fullscreen: when recording stops, so it stays in the scrollback).",
         ),
     ] = False,
+    fullscreen: Annotated[
+        bool,
+        typer.Option(
+            "--fullscreen/--no-fullscreen",
+            envvar="MIC2MD_FULLSCREEN",
+            help="Use the whole terminal while recording (transcript, session info, mic "
+            "history). --no-fullscreen keeps the compact inline status line.",
+        ),
+    ] = True,
     list_devices: Annotated[
         bool, typer.Option("--list-devices", help="List microphones and exit.")
     ] = False,
@@ -556,6 +717,7 @@ def main(
         vad=vad,
         beam_size=beam_size,
         show_transcript=show_transcript,
+        fullscreen=fullscreen,
     )
     if ctx.invoked_subcommand is not None:
         # The converted values (Path, enums), not the raw strings in ctx.params.
@@ -578,7 +740,11 @@ def main(
     llm_model = llm_model or llm.default_model(backend.value)
     output_dir = output_dir.expanduser()
     terms = _glossary_terms(glossary, output_dir)
-    writer, polished = _record(opts, backend, llm_model, ollama_url, output_dir, terms)
+    with ExitStack() as stack:
+        writer, polished = _record(
+            opts, backend, llm_model, ollama_url, output_dir, terms, stack=stack
+        )
+        _done()
     _emit_stdout(polished or writer.raw_text)
 
 
@@ -612,6 +778,14 @@ class RecordOptions:
     vad: Vad = Vad.silero
     beam_size: int = 5
     show_transcript: bool = False
+    fullscreen: bool = True
+
+
+def _done() -> None:
+    """Show the finished state in the fullscreen view (if it is up) before it closes."""
+    if _screen is not None:
+        _screen.view.done = True
+        _screen.view.stage = ""
 
 
 def _record(
@@ -622,9 +796,13 @@ def _record(
     output_dir: Path,
     terms: list[str] | None = None,
     tag: bool = True,
+    *,
+    stack: ExitStack,
 ) -> tuple[SessionWriter, str | None]:
     """Record until Ctrl+C, then polish, tag, save and update the index.
 
+    In fullscreen mode the view goes onto ``stack``, so it stays up for the LLM passes and
+    for whatever the caller does next, until the caller closes the stack.
     ``terms`` (the glossary) prime Whisper and the polish prompt with the right spelling.
 
     Returns the writer (its ``path`` is the session file) and the polished text, or None when
@@ -661,7 +839,14 @@ def _record(
     )
     started = datetime.now()
     writer = SessionWriter(output_dir, started, language, model_name, extra_meta=meeting_meta)
-    view = LiveView(language, model_name)
+    view = LiveView(
+        language,
+        model_name,
+        fullscreen=opts.fullscreen and console.is_terminal,
+        meeting=meeting_meta.get("meeting", ""),
+        participants=meeting_meta.get("participants", ""),
+        path=str(writer.path),
+    )
     recorder = Recorder(
         transcriber,
         Segmenter(silence_ms=opts.silence_ms, threshold=opts.threshold, detector=_detector(opts)),
@@ -671,22 +856,27 @@ def _record(
     )
 
     console.print(f"[dim]Saving to {writer.path}[/]")
-    console.rule("[bold red]● Listening[/]", style="red")
+    if view.fullscreen:
+        stack.enter_context(Screen(view))
+    else:
+        console.rule("[bold red]● Listening[/]", style="red")
     try:
         with MicStream(_parse_device(opts.device)) as mic:
             recorder.run(mic)
     except Exception as e:  # PortAudio raises plain Exceptions
         writer.discard_if_empty()
         transcriber.close()
-        console.print(f"[red]Microphone error:[/] {e}")
+        _say(f"[red]Microphone error:[/] {e}")
         raise typer.Exit(1) from e
     recorder.finish(mic)
     transcriber.close()
     ended = datetime.now()
 
     if writer.discard_if_empty():
-        console.print("[yellow]No speech detected — nothing saved.[/]")
+        _say("[yellow]No speech detected — nothing saved.[/]")
         raise typer.Exit()
+    # Only typed notes: nothing for the LLM, the notes are saved as they are.
+    no_llm = no_llm or not writer.lines
 
     polished = (
         None
@@ -710,8 +900,8 @@ def _record(
         writer.meta["tags"] = format_tags(tags)
     writer.finalize(polished, llm.describe(backend.value, llm_model), ended)
     _update_index(output_dir)
-    console.rule(style="green")
-    console.print(f"[green]✔ Saved[/] [link=file://{writer.path}]{writer.path}[/link]")
+    _later(Rule(style="green"))
+    _say(f"[green]✔ Saved[/] [link=file://{writer.path}]{writer.path}[/link]")
     return writer, polished
 
 
@@ -776,7 +966,7 @@ def polish(
     meta["llm_model"] = llm.describe(backend.value, llm_model)
     if tags := _run_tags(raw, language, backend, llm_model, ollama_url, output_dir):
         meta["tags"] = format_tags(tags)
-    write_final(file, meta, raw, polished, summary=extract_summary(text))
+    write_final(file, meta, raw, polished, summary=extract_summary(text), notes=extract_notes(text))
     _update_index(output_dir)
     console.print(f"[green]✔ Updated[/] {file}", soft_wrap=True)
     _emit_stdout(polished)
@@ -836,10 +1026,12 @@ def _record_for_summary(
     ollama_url: str,
     output_dir: Path,
     terms: list[str],
+    stack: ExitStack,
 ) -> Path:
     """Record and polish a new session for `summarize`; returns its file.
 
-    Tags are left to the summarize pass, so they are only asked for once.
+    Tags are left to the summarize pass, so they are only asked for once. A fullscreen view
+    stays on ``stack`` so the summary streams into it too.
     """
     opts = (ctx.obj or {}).get(RECORD_KEY) or RecordOptions()
     if lang:
@@ -847,9 +1039,11 @@ def _record_for_summary(
     if opts.no_llm:
         console.print("[red]--no-llm can't be combined with summarize.[/]")
         raise typer.Exit(2)
-    writer, polished = _record(opts, backend, llm_model, ollama_url, output_dir, terms, tag=False)
+    writer, polished = _record(
+        opts, backend, llm_model, ollama_url, output_dir, terms, tag=False, stack=stack
+    )
     if polished is None:
-        console.print(
+        _say(
             "[yellow]⚠ Skipping the summary because polishing didn't finish. Run "
             f"`mic2md summarize {writer.path}` later.[/]",
             soft_wrap=True,
@@ -909,16 +1103,38 @@ def summarize(
     ollama_url = _inherit(ctx, "ollama_url", ollama_url)
     output_dir = _inherit(ctx, "output_dir", output_dir).expanduser().resolve()
     terms = _glossary_terms(_inherit(ctx, "glossary", glossary), output_dir)
+    with ExitStack() as stack:
+        summary = _summarize(
+            ctx, file, lang, backend, llm_model, ollama_url, output_dir, terms, stack
+        )
+        _done()
+    _emit_stdout(summary)
+
+
+def _summarize(
+    ctx: typer.Context,
+    file: Path | None,
+    lang: Lang | None,
+    backend: Backend,
+    llm_model: str,
+    ollama_url: str,
+    output_dir: Path,
+    terms: list[str],
+    stack: ExitStack,
+) -> str:
+    """The body of `summarize`; returns the summary that was inserted."""
     imported = False
     if file is None:
-        file = _record_for_summary(ctx, lang, backend, llm_model, ollama_url, output_dir, terms)
+        file = _record_for_summary(
+            ctx, lang, backend, llm_model, ollama_url, output_dir, terms, stack
+        )
     elif imported := not file.resolve().is_relative_to(output_dir):
         file = _import_external(file, output_dir, lang)
         _update_index(output_dir)
     text = file.read_text(encoding="utf-8")
     meta, transcript = parse_document(text)
     if not transcript:
-        console.print("[red]No transcript found in file.[/]")
+        _say("[red]No transcript found in file.[/]")
         raise typer.Exit(1)
     language = lang.value if lang else meta.get("language", "en")
     summary = _stream_llm(
@@ -936,20 +1152,21 @@ def summarize(
             on_token=on_token,
             backend=backend.value,
             terms=terms,
+            notes=extract_notes(text),
         ),
         "file left unchanged",
     )
     if summary is None:
         if imported:
-            console.print(f"[dim]The imported file is kept: {file}[/]", soft_wrap=True)
+            _say(f"[dim]The imported file is kept: {file}[/]", soft_wrap=True)
         raise typer.Exit(1)
     meta["summary_model"] = llm.describe(backend.value, llm_model)
     if tags := _run_tags(transcript, language, backend, llm_model, ollama_url, output_dir):
         meta["tags"] = format_tags(tags)
     insert_summary(file, meta, text, summary)
     _update_index(output_dir)
-    console.print(f"[green]✔ Updated[/] {file}", soft_wrap=True)
-    _emit_stdout(summary)
+    _say(f"[green]✔ Updated[/] {file}", soft_wrap=True)
+    return summary
 
 
 @app.command()

@@ -125,7 +125,9 @@ def test_summarize_without_file_records_polishes_then_summarizes(tmp_path, monke
 
     seen = {}
 
-    def fake_record(opts, backend, llm_model, ollama_url, output_dir, terms=None, tag=True):
+    def fake_record(
+        opts, backend, llm_model, ollama_url, output_dir, terms=None, tag=True, stack=None
+    ):
         seen.update(opts=opts, tag=tag, output_dir=output_dir, terms=terms)
         writer = cli.SessionWriter(output_dir, datetime(2026, 9, 23, 10), opts.lang.value, "m")
         writer.append("um we ship friday")
@@ -427,3 +429,209 @@ def test_polish_prompt_explains_uncertain_marker():
     from mic2md import llm
 
     assert "`(?)` right after a word" in llm.build_messages("x", "en")[0]["content"]
+
+
+def test_fullscreen_run_prints_transcript_afterwards_only_with_flag(tmp_path, monkeypatch):
+    import queue
+    from datetime import datetime
+
+    import numpy as np
+
+    from mic2md import cli
+
+    class FakeTranscriber:
+        last_uncertain: set[str] = set()
+
+        def transcribe(self, audio, prompt=None, partial=False):
+            return "We ship on Friday."
+
+    class FakeSeg:
+        in_speech = False
+        level = 0.0
+        speaking = False
+        calibrated = True
+        last_start_s = 1.0
+
+        def feed(self, frame):
+            return frame
+
+    class FakeMic:
+        frames = queue.Queue()
+
+        def __init__(self):
+            self.frames.put(np.zeros(10, np.float32))
+
+    class StopLive:
+        def __init__(self, *a, **k):
+            self.kwargs = k
+            seen.append(k)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    printed, seen = [], []
+    monkeypatch.setattr(cli.console, "print", lambda obj, **k: printed.append(obj))
+    monkeypatch.setattr(cli, "Live", StopLive)
+
+    def stop_after_first(self):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.Recorder, "maybe_partial", stop_after_first)
+    for flag in (False, True):
+        printed.clear()
+        writer = cli.SessionWriter(tmp_path, datetime(2026, 9, 23, 10), "en", "m")
+        view = cli.LiveView("en", "m", fullscreen=True)
+        rec = cli.Recorder(FakeTranscriber(), FakeSeg(), writer, view, show_transcript=flag)
+        rec.run(FakeMic())
+        assert seen[-1]["screen"] is True
+        assert [str(p) for p in printed] == (["We ship on Friday."] if flag else [])
+        assert view.lines[0][1].plain == "We ship on Friday."
+
+
+def _note_recorder(tmp_path, monkeypatch, show_transcript=False):
+    from datetime import datetime
+
+    from mic2md import cli
+
+    printed = []
+    monkeypatch.setattr(cli.console, "print", lambda obj, **k: printed.append(obj))
+    writer = cli.SessionWriter(tmp_path, datetime(2026, 10, 1, 10), "en", "m")
+    rec = cli.Recorder(None, None, writer, cli.LiveView("en", "m"), show_transcript=show_transcript)
+    return rec, printed
+
+
+def test_typed_note_is_saved_on_enter(tmp_path, monkeypatch):
+    from mic2md import cli, keys
+
+    rec, printed = _note_recorder(tmp_path, monkeypatch, show_transcript=True)
+    monkeypatch.setattr(cli.time, "monotonic", lambda: rec._t0 + 75.0)
+    rec.handle_keys(["x", "n"])  # keys before `n` are ignored
+    assert rec.view.note == "" and rec.view.note_at == 75.0
+    rec.handle_keys(list("hej nn") + [keys.BACKSPACE, "å", keys.ENTER])
+    assert rec.view.note is None
+    assert rec.writer.notes == ["[00:01:15] hej nå"]
+    assert rec.view.notes == 1 and printed[0].plain == "✎ hej nå"
+
+
+def test_m_toggles_matrix_but_is_typed_inside_a_note(tmp_path, monkeypatch):
+    from mic2md import keys
+
+    rec, _ = _note_recorder(tmp_path, monkeypatch)
+    rec.handle_keys(["m"])
+    assert rec.view.matrix is not None
+    rec.handle_keys(["n", "m"])
+    assert rec.view.note == "m" and rec.view.matrix is not None
+    rec.handle_keys([keys.ESC, "M"])
+    assert rec.view.matrix is None
+
+
+def test_esc_and_empty_notes_save_nothing(tmp_path, monkeypatch):
+    from mic2md import keys
+
+    rec, _ = _note_recorder(tmp_path, monkeypatch)
+    rec.handle_keys(["n", "a", keys.ESC, "n", " ", keys.ENTER, "n", "b", keys.CLEAR, keys.ENTER])
+    assert rec.writer.notes == [] and rec.view.note is None
+
+
+def test_note_open_at_ctrl_c_is_kept(tmp_path, monkeypatch):
+    import queue
+
+    rec, _ = _note_recorder(tmp_path, monkeypatch)
+
+    class Seg:
+        def flush(self):
+            return None
+
+    class Mic:
+        frames = queue.Queue()
+
+    rec.seg = Seg()
+    rec.handle_keys(list("nunfinished"))
+    rec.finish(Mic())
+    assert rec.writer.notes == ["[00:00:00] unfinished"]
+
+
+def test_polish_command_carries_notes_over(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from mic2md import cli
+    from mic2md.writer import extract_notes
+
+    f = tmp_path / "transcripts" / "2026-10" / "2026-10-01T10-00-00.md"
+    f.parent.mkdir(parents=True)
+    f.write_text(
+        "---\ndate: 2026-10-01T10:00:00+02:00\nlanguage: en\n---\n\n# Transcript x\n\n"
+        "[00:00:01] Hello.\n\n[00:00:05] NOTE: my note\n\n",
+        encoding="utf-8",
+    )
+    seen = {}
+
+    def fake_polish(raw, *a, **k):
+        seen["raw"] = raw
+        return "# Hi\n\nHello."
+
+    monkeypatch.setattr(cli, "_run_polish", fake_polish)
+    monkeypatch.setattr(cli, "_run_tags", lambda *a, **k: [])
+    result = CliRunner().invoke(cli.app, ["polish", str(f), "-o", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert seen["raw"] == "[00:00:01] Hello."
+    assert extract_notes(f.read_text(encoding="utf-8")) == ["[00:00:05] my note"]
+
+
+def test_llm_pass_inside_fullscreen_streams_into_the_view_and_replays(monkeypatch):
+    from mic2md import cli
+
+    class FakeLive:
+        def __init__(self, *a, **k):
+            assert k["screen"] is True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    printed = []
+    monkeypatch.setattr(cli, "Live", FakeLive)
+    monkeypatch.setattr(cli.console, "print", lambda obj, **k: printed.append(obj))
+    monkeypatch.setattr(cli.llm, "check", lambda *a, **k: None)
+    view = cli.LiveView("en", "m", fullscreen=True)
+
+    def call(on_token):
+        for token in ["# Ti", "tle\n\nBody"]:
+            on_token(token)
+            seen.append(view.output)
+        return "# Title\n\nBody"
+
+    seen = []
+    with cli.Screen(view):
+        result = cli._stream_llm("polishing", cli.Backend.ollama, "qwen", "u", call, "kept")
+        cli._say("[green]✔ Saved[/] x")
+        assert printed == []  # nothing prints while the screen is up
+        assert view.tasks[0].status == "done" and view.tasks[0].chars == 13
+        assert view.log[-1].plain == "✔ Saved x"
+    assert result == "# Title\n\nBody"
+    assert seen == ["# Ti", "# Title\n\nBody"]
+    assert cli._screen is None
+    texts = [str(p) for p in printed]
+    assert "# Title\n\nBody" in texts and texts[-1] == "[green]✔ Saved[/] x"
+
+
+def test_failed_llm_pass_inside_fullscreen_is_logged(monkeypatch):
+    from mic2md import cli
+
+    monkeypatch.setattr(cli, "Live", lambda *a, **k: cli.ExitStack())
+    monkeypatch.setattr(cli.console, "print", lambda obj, **k: None)
+    monkeypatch.setattr(cli.llm, "check", lambda *a, **k: None)
+    view = cli.LiveView("en", "m", fullscreen=True)
+
+    def call(on_token):
+        raise cli.llm.LLMError("boom")
+
+    with cli.Screen(view):
+        assert cli._stream_llm("polishing", cli.Backend.ollama, "q", "u", call, "kept") is None
+    assert view.tasks[0].status == "failed"
+    assert "Polishing failed, kept" in view.log[-1].plain

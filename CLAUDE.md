@@ -40,7 +40,9 @@ src/mic2md/
   meetings.py     EventKit lookup of the meeting in progress (title + attendees) for front matter
   index.py        index.md builder (scans transcripts/**/ front matter), migrate_flat()
   writer.py       SessionWriter (incremental append), write_final(), parse_document()
-  ui.py           rich LiveView: partial line + status bar with mic level meter
+  keys.py         KeyReader (stdin cbreak, non-blocking) + parse_keys, for typed notes
+  ui.py           rich LiveView: fullscreen Layout (header, transcript panel, session sidebar
+                  ≥100 cols, mic history footer) or inline partial line + status bar
 tests/            pytest; pure-logic tests with synthetic audio and httpx.MockTransport
 lauche.sh         Legacy record-then-transcribe script (predecessor, kept for reference)
 ```
@@ -84,6 +86,13 @@ lauche.sh         Legacy record-then-transcribe script (predecessor, kept for re
   accepts the older `voice2text:summary` markers from before the rename.
   `parse_document` strips that block so it is never fed back to the LLM as transcript;
   `insert_summary` replaces it in place; `polish` carries it over via `extract_summary`.
+- **Typed notes**: `n` while recording opens an editor (`Recorder.handle_keys`, keys from
+  `keys.KeyReader`, which uses cbreak so Ctrl+C still raises). `SessionWriter.append_note` writes
+  `[HH:MM:SS] NOTE: text` to disk immediately but keeps notes out of `lines`/`raw_text`, so
+  polish and tags never see them. `write_final(notes=)` puts them between
+  `<!-- mic2md:notes -->` markers as `## Notes` at the end. `parse_document` strips both forms;
+  `extract_notes` reads either; `polish` carries them over; `summarize` sends them as `<notes>`
+  (`llm.notes_block`). A note still open at Ctrl+C is saved in `finish()`.
 - **Tags**: `tags: [a, b-c]` (one-line YAML flow list, so the front matter stays flat and
   Obsidian reads it). Written by `writer.format_tags`, read by `writer.parse_tags`. Produced by
   a separate quiet LLM call (`llm.extract_tags`, `TAGS_PROMPT`) after polish, in `polish`,
@@ -130,6 +139,19 @@ lauche.sh         Legacy record-then-transcribe script (predecessor, kept for re
   No `--model` unless `--llm` is given, so Copilot picks its default.
 - **Ollama calls** set `think: false`, so reasoning models like qwen3.5 answer directly.
   `strip_wrapping` still removes `<think>` blocks and code fences as a fallback.
+- **Fullscreen view** (default; `--no-fullscreen`, or stderr not a TTY, gives the inline
+  status line): `cli.Screen` (KeyReader + `Live(screen=True)`) on the alternate screen.
+  `_record` puts it on the caller's `ExitStack`, so it stays up from recording through
+  `finish()`, polish, tags and, in `summarize` without FILE, the summary. While it is up
+  (module global `cli._screen`) nothing may print: use `_say` (logged in the sidebar and
+  replayed after close) or `_later` (replay only); `_stream_llm` hands off to
+  `Screen.run_llm`, which streams into `LiveView.output` and adds an `LlmProgress` step.
+  `LiveView.stop()` freezes the clock when recording ends. `--transcript` prints
+  `view.lines` after it closes.
+  `ui.BottomAligned` renders the tail of the transcript that fits the panel height.
+  `m` (outside the note editor) toggles `LiveView.matrix`, a `ui.MatrixRain` that
+  `BottomAligned` paints into blank cells (`_overlay`), never directly beside text. Purely
+  visual: it advances on wall-clock time in the render thread and is never saved.
 - **Heavy imports** (`pywhispercpp`, `sounddevice`) are imported lazily, so `--help`,
   `models` and the tests stay fast and work without audio hardware.
 - Style: ruff (line length 100, rules E/F/I/B/UP/SIM), type hints, `from __future__ import

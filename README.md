@@ -41,6 +41,17 @@ Index updated: ~/Documents/mic2md/index.md
 - **Neural speech detection.** [Silero VAD](https://github.com/snakers4/silero-vad) decides
   when you're speaking, so fans, typing and room noise don't start or cut off sentences.
   `--vad energy` switches to a simple loudness threshold instead.
+- **Fullscreen recording view.** While recording, the terminal shows the live transcript with
+  timestamps and the in-progress sentence, a session sidebar (meeting, people, model, word
+  count, file) on wide terminals, and a scrolling mic level history. After Ctrl+C the view
+  stays up while the LLM polishes, tags and (with `summarize`) summarizes: the output streams
+  into the transcript panel and the sidebar lists each step. When it's done, the output and
+  messages are left in the scrollback. `--no-fullscreen` keeps the compact one-line status
+  bar. Press `m` to toggle a Matrix-style rain behind the transcript.
+- **Your own notes.** Press `n` while recording to type a note (something you don't want to
+  say out loud). Enter saves it with the time you pressed `n`, Esc cancels. Notes are saved to
+  disk right away and end up verbatim under `## Notes` at the end of the document; polishing
+  never rewrites them, and `summarize` uses them as context (e.g. an owner or a deadline).
 - **Timestamps.** Every line in the raw transcript starts with the time into the recording,
   e.g. `[00:12:31]`. Polishing keeps one per section (`## Budget (00:12:31)`) and `summarize`
   notes when decisions and action items were discussed, so you can find them in a long meeting.
@@ -168,6 +179,8 @@ Without a command, `mic2md` records. `p` and `s` are short for `polish` and `sum
 | `--no-llm` | | off | Skip the LLM pass (polish and tags) and save the raw transcript |
 | `--glossary` | `MIC2MD_GLOSSARY` | `glossary.txt` in the output folder, if present | Names and terms, one per line, for Whisper and the LLM |
 | `--no-calendar` | `MIC2MD_NO_CALENDAR` | off | Skip the meeting lookup (Calendar, then a prompt if none is found) |
+| `--fullscreen / --no-fullscreen` | `MIC2MD_FULLSCREEN` | on | Use the whole terminal while recording; `--no-fullscreen` shows a one-line status bar instead |
+| `-t, --transcript` | | off | Also print the transcript to the terminal (in fullscreen: when recording stops, so it stays in the scrollback) |
 | `--ollama-url` | `OLLAMA_HOST` | `http://localhost:11434` | Ollama server |
 | `-o, --output-dir` | `MIC2MD_OUTPUT_DIR` | `~/Documents/mic2md` | Holds `index.md` and `transcripts/YYYY-MM/` |
 | `-d, --device` | `MIC2MD_DEVICE` | system default | Microphone ID or name |

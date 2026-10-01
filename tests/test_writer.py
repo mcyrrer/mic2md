@@ -162,3 +162,57 @@ def test_append_prefixes_session_time(tmp_path):
     w.append("No time.")
     assert w.raw_text == "[01:02:05] Hello.\n\nNo time."
     assert "[01:02:05] Hello.\n\nNo time.\n\n" in w.path.read_text()
+
+
+def test_notes_are_saved_immediately_and_kept_out_of_raw_text(tmp_path):
+    from datetime import datetime
+
+    from mic2md.writer import SessionWriter, extract_notes, parse_document
+
+    w = SessionWriter(tmp_path, datetime(2026, 10, 1, 10), "en", "m")
+    w.append("Hello.", at=1.0)
+    w.append_note("check  budget\nwith Bo", at=5.0)
+    w.append("Bye.", at=9.0)
+    assert w.raw_text == "[00:00:01] Hello.\n\n[00:00:09] Bye."
+    on_disk = w.path.read_text(encoding="utf-8")
+    assert "[00:00:05] NOTE: check budget with Bo" in on_disk
+    # A crashed session: notes come back from the raw lines, not as transcript.
+    assert extract_notes(on_disk) == ["[00:00:05] check budget with Bo"]
+    assert parse_document(on_disk)[1] == w.raw_text
+
+
+def test_finalize_writes_notes_section_for_polished_and_raw(tmp_path):
+    from datetime import datetime
+
+    from mic2md.writer import SessionWriter, extract_notes, parse_document
+
+    for polished in ("# Title\n\nHello.", None):
+        w = SessionWriter(tmp_path / str(bool(polished)), datetime(2026, 10, 1, 10), "sv", "m")
+        w.append("Hello.", at=1.0)
+        w.append_note("åäö note", at=65.0)
+        w.finalize(polished, "llm", datetime(2026, 10, 1, 11))
+        text = w.path.read_text(encoding="utf-8")
+        assert "## Anteckningar\n\n- **00:01:05** åäö note" in text
+        assert "NOTE:" not in text
+        assert extract_notes(text) == ["[00:01:05] åäö note"]
+        assert "åäö" not in parse_document(text)[1]
+
+
+def test_notes_only_session_is_not_discarded(tmp_path):
+    from datetime import datetime
+
+    from mic2md.writer import SessionWriter
+
+    w = SessionWriter(tmp_path, datetime(2026, 10, 1, 10), "en", "m")
+    w.append_note("only a note", at=1.0)
+    assert not w.discard_if_empty()
+
+
+def test_insert_summary_keeps_notes_block(tmp_path):
+    from mic2md.writer import extract_notes, format_notes, insert_summary
+
+    path = tmp_path / "a.md"
+    text = "---\ndate: x\n---\n\nBody.\n\n" + format_notes(["[00:00:01] n1"], "en")
+    path.write_text(text, encoding="utf-8")
+    insert_summary(path, {"date": "x"}, text, "Summary.")
+    assert extract_notes(path.read_text(encoding="utf-8")) == ["[00:00:01] n1"]

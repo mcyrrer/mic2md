@@ -213,3 +213,12 @@ def test_drop_title_time_only_touches_the_title():
     text = "# Budget and hiring (00:00:02)\n\n## Budget (00:00:02)\nText."
     assert llm.drop_title_time(text) == "# Budget and hiring\n\n## Budget (00:00:02)\nText."
     assert llm.drop_title_time("# Plain\n\nx") == "# Plain\n\nx"
+
+
+def test_summary_messages_include_typed_notes():
+    from mic2md import llm
+
+    msgs = llm.build_summary_messages("hi", "en", notes=["[00:00:05] Bo owns it"])
+    assert "<notes>\n[00:00:05] Bo owns it\n</notes>" in msgs[1]["content"]
+    assert "<notes>" in msgs[0]["content"]  # the rule explaining them
+    assert "<notes>\n" not in llm.build_summary_messages("hi", "en")[1]["content"]
