@@ -184,22 +184,56 @@ def _meeting_meta() -> dict[str, str]:
     """Front matter for the current meeting, from the calendar or else asked interactively."""
     from mic2md import meetings
 
-    meeting = None
+    found: list[meetings.Meeting] = []
     try:
         with console.status("Checking calendar…"):
-            meeting = meetings.current_meeting()
+            found = meetings.current_meetings()
     except Exception as e:  # never block a recording on the calendar
         console.print(f"[yellow]⚠ Calendar lookup skipped:[/] {e}")
+    meeting = _choose_meeting(found)
     if meeting:
         console.print(f"Meeting: {meeting.title}", style="dim", markup=False, highlight=False)
         return {"meeting": meeting.title, "participants": ", ".join(meeting.participants)}
     if not sys.stdin.isatty():
         return {"meeting": "", "participants": ""}
-    console.print("[dim]No meeting in the calendar right now.[/]")
+    if not found:
+        console.print("[dim]No meeting in the calendar right now.[/]")
     return {
         "meeting": _ask("Meeting name"),
         "participants": _normalize_participants(_ask("Participants, comma-separated")),
     }
+
+
+def _meeting_line(meeting) -> str:
+    """``10:00–10:30  Standup  (3 people)`` for the meeting picker."""
+    when = ""
+    if meeting.start and meeting.end:
+        when = f"{meeting.start:%H:%M}–{meeting.end:%H:%M}  "
+    people = len(meeting.participants)
+    count = f"  ({people} {'person' if people == 1 else 'people'})" if people else ""
+    return f"{when}{meeting.title or '(no title)'}{count}"
+
+
+def _choose_meeting(found: list):
+    """The meeting to record; asks which one when several are scheduled right now.
+
+    The first one (the one starting last) is the default, also without a terminal.
+    0 means none of them: the caller then asks for a name like when there is no meeting.
+    """
+    if len(found) < 2:
+        return found[0] if found else None
+    if not sys.stdin.isatty():
+        console.print(f"[dim]{len(found)} meetings right now; using the one that started last.[/]")
+        return found[0]
+    console.print(f"[bold]{len(found)} meetings right now:[/]")
+    for i, meeting in enumerate(found, 1):
+        console.print(f"  [cyan]{i}[/]  {escape(_meeting_line(meeting))}", highlight=False)
+    console.print("  [cyan]0[/]  [dim]none of these[/]")
+    while True:
+        answer = _ask("Which meeting?", "1")
+        if answer.isdigit() and int(answer) <= len(found):
+            return found[int(answer) - 1] if int(answer) else None
+        console.print(f"[yellow]Choose a number from 0 to {len(found)}.[/]")
 
 
 def _update_index(output_dir: Path) -> None:

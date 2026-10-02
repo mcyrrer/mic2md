@@ -38,7 +38,8 @@ src/mic2md/
   llm.py          chat() → Ollama /api/chat, `claude -p` (stream-json) or `copilot -p`
                   (text; all CLIs via _run_cli from an empty temp dir), SYSTEM_PROMPT
                   (polish), SUMMARY_PROMPT (summarize), check(), strip_wrapping()
-  meetings.py     EventKit lookup of the meeting in progress (title + attendees) for front matter
+  meetings.py     EventKit lookup of the meetings in progress (title + attendees) for front
+                  matter; several at once → `cli._choose_meeting` asks which one
   index.py        index.md builder (scans transcripts/**/ front matter), migrate_flat()
   writer.py       SessionWriter (incremental append), write_final(), parse_document()
   keys.py         KeyReader (stdin cbreak, non-blocking) + parse_keys, for typed notes
