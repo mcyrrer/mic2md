@@ -253,6 +253,7 @@ class LiveView:
         meeting: str = "",
         participants: str = "",
         path: str = "",
+        session_type: str = "meeting",
     ) -> None:
         self.language = language
         self.model_name = model_name
@@ -260,6 +261,8 @@ class LiveView:
         self.meeting = meeting
         self.participants = participants
         self.path = path
+        # Shown where a meeting title would be, when there is none (e.g. "Thoughts").
+        self.title = meeting or ("" if session_type == "meeting" else session_type.capitalize())
         self.started = time.monotonic()
         self.partial = ""
         self.level = 0.0
@@ -393,9 +396,9 @@ class LiveView:
         left = Text()
         left.append_text(self._badge())
         left.append(f"  {self.elapsed()}", style="bold")
-        if self.meeting:
+        if self.title:
             left.append("   ")
-            left.append(self.meeting, style="bold cyan")
+            left.append(self.title, style="bold cyan")
         right = Text(f"{self.language} · {self.model_name} ", style="cyan")
         grid = Table.grid(expand=True)
         grid.add_column(no_wrap=True, overflow="ellipsis", ratio=1)
@@ -458,6 +461,8 @@ class LiveView:
         info.add_column(overflow="fold")
         if self.meeting:
             info.add_row("Meeting", Text(self.meeting))
+        elif self.title:
+            info.add_row("Type", Text(self.title))
         if self.participants:
             info.add_row("People", Text(self.participants))
         info.add_row("Language", Text(self.language))

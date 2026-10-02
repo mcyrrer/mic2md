@@ -9,10 +9,18 @@ from datetime import datetime
 from pathlib import Path
 
 from mic2md import REPO_URL
-from mic2md.writer import TRANSCRIPTS_DIR, parse_document, parse_tags
+from mic2md.writer import (
+    DEFAULT_TYPE,
+    TRANSCRIPTS_DIR,
+    SessionType,
+    parse_document,
+    parse_tags,
+    session_type,
+)
 
 INDEX_FILE = "index.md"
 _SESSION_NAME = re.compile(r"\A(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})(?:-[a-z0-9-]+)?\.md\Z")
+_MONTH_DIR = re.compile(r"\A\d{4}-\d{2}\Z")
 
 
 @dataclass
@@ -21,6 +29,7 @@ class Entry:
     meeting: str
     path: Path  # relative to the output folder
     tags: list[str] = field(default_factory=list)
+    session_type: SessionType = DEFAULT_TYPE
 
 
 def _started(meta: dict[str, str], path: Path) -> datetime:
@@ -50,6 +59,7 @@ def collect(output_dir: Path) -> list[Entry]:
                 meta.get("meeting", ""),
                 path.relative_to(output_dir),
                 parse_tags(meta.get("tags", "")),
+                session_type(meta),
             )
         )
     entries.sort(key=lambda e: e.started.replace(tzinfo=None), reverse=True)
@@ -94,12 +104,15 @@ def render(entries: list[Entry]) -> str:
                 "",
                 f"## {month}",
                 "",
-                "| Date | Time | Meeting | Tags |",
-                "|---|---|---|---|",
+                "| Date | Time | Type | Title | Tags |",
+                "|---|---|---|---|---|",
             ]
         link = f"[{e.started:%Y-%m-%d}]({e.path.as_posix()})"
         tags = " ".join(f"`{t}`" for t in e.tags)
-        lines.append(f"| {link} | {e.started:%H:%M} | {_cell(e.meeting)} | {_cell(tags)} |")
+        lines.append(
+            f"| {link} | {e.started:%H:%M} | {e.session_type} | {_cell(e.meeting)} "
+            f"| {_cell(tags)} |"
+        )
     lines += _tag_section(entries)
     lines += [
         "",
@@ -127,17 +140,32 @@ def update(output_dir: Path) -> Path:
 
 
 def migrate_flat(output_dir: Path) -> list[Path]:
-    """Move session files saved directly in the output folder (older versions) into place."""
+    """Move sessions saved by older versions into ``transcripts/meeting/YYYY-MM/``.
+
+    Older layouts: files directly in the output folder, and ``transcripts/YYYY-MM/`` (from
+    before session types; all of those were meetings). Files are moved, never rewritten, and
+    a file whose target already exists stays where it is.
+    """
+    transcripts = output_dir / TRANSCRIPTS_DIR
+    legacy_months = sorted(
+        d for d in transcripts.glob("*") if d.is_dir() and _MONTH_DIR.match(d.name)
+    )
+    candidates = sorted(output_dir.glob("*.md")) + [
+        p for d in legacy_months for p in sorted(d.glob("*.md"))
+    ]
     moved = []
-    for path in sorted(output_dir.glob("*.md")):
+    for path in candidates:
         m = _SESSION_NAME.match(path.name)
         if not m:
             continue
         started = datetime.strptime(m.group(1), "%Y-%m-%dT%H-%M-%S")
-        target = path.parent / TRANSCRIPTS_DIR / f"{started:%Y-%m}" / path.name
+        target = transcripts / DEFAULT_TYPE.value / f"{started:%Y-%m}" / path.name
         if target.exists():
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
         path.replace(target)
         moved.append(target)
+    for d in legacy_months:
+        if not any(d.iterdir()):
+            d.rmdir()
     return moved
