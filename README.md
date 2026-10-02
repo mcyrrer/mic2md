@@ -11,7 +11,7 @@ required, no typing required.
 ```
 $ mic2md --transcript
 Meeting: Release planning
-Saving to ~/Documents/mic2md/transcripts/2026-09/2026-09-23T20-15-30.md
+Saving to ~/Documents/mic2md/transcripts/meeting/2026-09/2026-09-23T20-15-30.md
 ───────────────────────────── ● Listening ─────────────────────────────
 Um so today I want to talk about the the new release.
 First we need to fix the login bug. Second, ah, we should update the documentation.
@@ -29,7 +29,7 @@ Done in 9s (142 characters).
 Tags: release, login-bug, documentation
 Index updated: ~/Documents/mic2md/index.md
 ───────────────────────────────────────────────────────────────────────
-✔ Saved ~/Documents/mic2md/transcripts/2026-09/2026-09-23T20-15-30.md
+✔ Saved ~/Documents/mic2md/transcripts/meeting/2026-09/2026-09-23T20-15-30.md
 ```
 
 ## Why mic2md
@@ -89,6 +89,10 @@ Index updated: ~/Documents/mic2md/index.md
   terminal the one that started last is used). If there is no meeting, you're asked
   for a name and participants (only in an interactive terminal; press Enter to skip). The first
   run asks for Calendar access. Turn this off with `--no-calendar`.
+- **Meetings or thoughts.** Every recording has a type. `meeting` is the default and works as
+  described here. `mic2md --type thoughts` (`-T thoughts`) is for thinking out loud on your
+  own: no calendar lookup, and the summary lists key ideas, open questions and next steps
+  instead of decisions and action items. Each type gets its own folder under `transcripts/`.
 - **Glossary for names and jargon.** The meeting title, the participants and the terms in
   `glossary.txt` in the output folder (one per line, `#` for comments; or `--glossary FILE`)
   are given to Whisper as a prompt, so names and product terms are spelled correctly while you
@@ -105,16 +109,16 @@ Index updated: ~/Documents/mic2md/index.md
   again replaces the old summary, and `polish` keeps it.
 - **Import from elsewhere.** `polish` and `summarize` also take a file from outside the
   output folder (e.g. notes or a transcript from another tool). It is imported first: you're
-  asked for the date, language, meeting name and participants, it's copied into
-  `transcripts/YYYY-MM/` with that front matter plus `source:` (the original path), and the
+  asked for the date, language, type and (for meetings) meeting name and participants, it's
+  copied into `transcripts/<type>/YYYY-MM/` with that front matter plus `source:` (the original path), and the
   original is left untouched. The LLM then works on the copy, which shows up in `index.md`.
 - **Topic tags.** After polishing (and in `polish` / `summarize`) the LLM adds up to 8 topic
   tags to the front matter, e.g. `tags: [q4-budget, hiring]`. It is shown the tags your other
   notes already use and reuses them when they fit, so related meetings share tags. They also
   work as tags in Obsidian. `mic2md tag --all` tags older notes.
-- **Organized by month with an index.** Sessions go into `transcripts/YYYY-MM/` inside the
-  output folder. `index.md` in the output folder has one table per month (date, time,
-  meeting, tags), newest first, and a Tags section listing every tag with links to its notes.
+- **Organized by type and month with an index.** Sessions go into
+  `transcripts/<type>/YYYY-MM/` (e.g. `transcripts/meeting/2026-09/`) inside the output folder.
+  `index.md` in the output folder has one table per month (date, time, type, title, tags), newest first, and a Tags section listing every tag with links to its notes.
   It's rebuilt from the files' front matter after each recording, `polish`, `summarize` and
   `tag`, so don't edit it by hand. Run `mic2md reindex` to rebuild it yourself (this also moves
   sessions saved by older versions into the month folders).
@@ -135,6 +139,7 @@ mic2md -l sv                            # record in Swedish (KB-Whisper large)
 mic2md -m small.en                      # faster, smaller English model
 mic2md --no-llm                         # raw transcript only, no LLM pass
 mic2md --no-calendar                    # don't look up or ask for the meeting
+mic2md -T thoughts                      # general thoughts: no calendar, ideas + next steps
 mic2md --backend claude                 # polish with Claude (`claude -p`) instead of Ollama
 mic2md summarize                        # record a meeting, polish it, then add meeting notes
 mic2md s                                # same, short name (`p` = polish)
@@ -149,8 +154,8 @@ mic2md | pbcopy                         # also copy the final text to the clipbo
 mic2md --model-path ~/models/my.bin     # use your own ggml model file
 mic2md --version
 
-mic2md polish ~/Documents/mic2md/transcripts/2026-09/2026-09-23T20-15-30.md   # re-run the LLM pass
-mic2md summarize ~/Documents/mic2md/transcripts/2026-09/2026-09-23T20-15-30.md  # add meeting notes on top
+mic2md polish ~/Documents/mic2md/transcripts/meeting/2026-09/2026-09-23T20-15-30.md   # re-run the LLM pass
+mic2md summarize ~/Documents/mic2md/transcripts/meeting/2026-09/2026-09-23T20-15-30.md  # add meeting notes on top
 mic2md summarize ~/Downloads/teams-transcript.md   # import a file from elsewhere, then summarize
 mic2md tag FILE...                      # (re-)tag specific notes
 mic2md tag --all                        # add tags to every note that has none
@@ -174,7 +179,7 @@ Without a command, `mic2md` records, polishes and summarizes. `p` and `s` are sh
 | `polish FILE` (`p`) | Re-run the LLM polish on a session file (keeps an existing summary); imports files from outside the output folder first |
 | `summarize [FILE]` (`s`) | Add meeting notes to the top of a session file; imports files from outside the output folder first. Without FILE: record a new meeting, polish it, then summarize it |
 | `tag [FILE...] [--all]` | Add topic tags. Named files are always re-tagged; `--all` picks every session without tags |
-| `reindex` | Rebuild `index.md` and move sessions saved by older versions into `transcripts/YYYY-MM/` |
+| `reindex` | Rebuild `index.md` and move sessions saved by older versions into `transcripts/meeting/YYYY-MM/` |
 | `models` | List Whisper models and which are downloaded |
 
 ### Options
@@ -188,11 +193,12 @@ Without a command, `mic2md` records, polishes and summarizes. `p` and `s` are sh
 | `--llm` | `MIC2MD_LLM` | `qwen3.5:9b` / `sonnet` / Copilot's default | Model for polishing, summaries and tags. With `claude`: `sonnet`, `opus`, `fable`, `haiku` or a full model ID. With `copilot`: e.g. `gpt-5.4` |
 | `--no-llm` | | off | Skip the LLM pass (polish and tags) and save the raw transcript |
 | `--glossary` | `MIC2MD_GLOSSARY` | `glossary.txt` in the output folder, if present | Names and terms, one per line, for Whisper and the LLM |
+| `-T, --type` | `MIC2MD_TYPE` | `meeting` | `meeting` or `thoughts`: picks the folder under `transcripts/`, the summary style, and (thoughts) skips the calendar. Also on `polish`/`summarize` for imports |
 | `--no-calendar` | `MIC2MD_NO_CALENDAR` | off | Skip the meeting lookup (Calendar, then a prompt if none is found) |
 | `--fullscreen / --no-fullscreen` | `MIC2MD_FULLSCREEN` | on | Use the whole terminal while recording; `--no-fullscreen` shows a one-line status bar instead |
 | `-t, --transcript` | | off | Also print the transcript to the terminal (in fullscreen: when recording stops, so it stays in the scrollback) |
 | `--ollama-url` | `OLLAMA_HOST` | `http://localhost:11434` | Ollama server |
-| `-o, --output-dir` | `MIC2MD_OUTPUT_DIR` | `~/Documents/mic2md` | Holds `index.md` and `transcripts/YYYY-MM/` |
+| `-o, --output-dir` | `MIC2MD_OUTPUT_DIR` | `~/Documents/mic2md` | Holds `index.md` and `transcripts/<type>/YYYY-MM/` |
 | `-d, --device` | `MIC2MD_DEVICE` | system default | Microphone ID or name |
 | `-t, --transcript` | | off | Print each finished sentence to the terminal as it's committed (the live partial line always shows) |
 | `--vad` | `MIC2MD_VAD` | `silero` | Speech detection: `silero` (neural) or `energy` (loudness threshold) |

@@ -16,11 +16,11 @@ Markdown file per recording session, plus a derived, fully-regenerated `index.md
 | **Utterance audio** | `np.ndarray`, float32, variable length (concatenated frames, incl. preroll) | `Segmenter._finish` / `.flush()` | `Transcriber.transcribe` |
 | **Transcript text (line)** | `str`, cleaned (`clean_text`), optionally with `word(?)` uncertainty markers | `Transcriber.transcribe` + `mark_uncertain` | `SessionWriter.append`, terminal echo (`--transcript`) |
 | **Token confidence** | `list[tuple[bytes, float]]` (token bytes, probability) | `Transcriber._text_tokens` | `uncertain_words` → `Transcriber.last_uncertain` |
-| **Session Markdown file** | `<output_dir>/transcripts/YYYY-MM/<ISO-timestamp>[-slug].md`: flat `key: value` front matter, then either raw `[HH:MM:SS] text` lines (mid-recording / no-LLM) or a polished body, plus an optional `<!-- mic2md:summary -->…<!-- /mic2md:summary -->` block | `SessionWriter` (raw), `write_final`/`insert_summary` (final) | `parse_document`, `index.collect`, re-`polish`/`summarize` |
+| **Session Markdown file** | `<output_dir>/transcripts/<type>/YYYY-MM/<ISO-timestamp>[-slug].md` (`<type>` = `meeting` or `thoughts`, also the `type:` front matter): flat `key: value` front matter, then either raw `[HH:MM:SS] text` lines (mid-recording / no-LLM) or a polished body, plus an optional `<!-- mic2md:summary -->…<!-- /mic2md:summary -->` block | `SessionWriter` (raw), `write_final`/`insert_summary` (final) | `parse_document`, `index.collect`, re-`polish`/`summarize` |
 | **Front matter** | `dict[str, str]`: `date`, `language`, `whisper_model`, `llm_model`/`summary_model`, `meeting`, `participants`, `tags`, `duration`, `source` (imports) | `SessionWriter.__init__`, `_meeting_meta`, `_import_external` | `render_front_matter`/`split_front_matter`, `index.py` |
 | **Tags** | `list[str]`, lowercase-hyphenated, max 8, front matter as one-line YAML flow list `[a, b-c]` | `llm.extract_tags` + `normalize_tag` | `writer.format_tags`/`parse_tags`, `index.known_tags`, `index.render` (Tags section) |
 | **Summary block** | Markdown (exec summary, decisions, action-item table, open questions, risks) wrapped in HTML comment markers | `llm.summarize` | `writer.insert_summary`/`extract_summary` |
-| **index.md** | `<output_dir>/index.md`: one table per `YYYY-MM` (date, time, meeting, tags) + a `## Tags` section + footer | `index.render` from `index.collect` (scans front matter) | Humans / Obsidian; also read back by `index.known_tags` |
+| **index.md** | `<output_dir>/index.md`: one table per `YYYY-MM` (date, time, type, title, tags) + a `## Tags` section + footer | `index.render` from `index.collect` (scans front matter) | Humans / Obsidian; also read back by `index.known_tags` |
 | **glossary.txt** | Plain text, one term per line, `#` comments/blank lines skipped | User-authored, at `--glossary` or `<output_dir>/glossary.txt` | `transcriber.read_glossary` → `build_vocabulary` (Whisper prompt) and `llm.terms_rule` (LLM prompt) |
 | **ggml model file** | Binary `.bin` (quantized whisper.cpp weights), cached under `~/.cache/mic2md/models/` (or `MIC2MD_CACHE_DIR`/`XDG_CACHE_HOME`) | Downloaded from Hugging Face by `models.ensure_model`/`download` | `Transcriber.__init__` (via `pywhispercpp.Model`) |
 | **Meeting metadata** | `Meeting(title: str, participants: list[str])` | `meetings.current_meeting` (EventKit) or interactive `_ask` prompts | Front matter, `build_vocabulary`, `build_summary_messages` |
@@ -51,7 +51,7 @@ Markdown file per recording session, plus a derived, fully-regenerated `index.md
   `pywhispercpp`), the glossary (read-only input), EventKit calendar data (read-only
   lookup, never mutated).
 - **Import is copy-only.** `polish`/`summarize` on a file outside `--output-dir` copies it
-  into `transcripts/YYYY-MM/` (`writer.import_document`); the original source file is never
+  into `transcripts/<type>/YYYY-MM/` (`writer.import_document`); the original source file is never
   modified or deleted.
 
 ## 3. Input / output data per unit
@@ -65,7 +65,7 @@ read as logical components, each owning a slice of the data flow:
 | `mic2md polish FILE` (`p`) | Existing session `.md` (or external file, imported first) | Same `.md` rewritten in place with polished body + tags; updated `index.md`; stdout gets the polished text if piped |
 | `mic2md summarize [FILE]` (`s`) | Existing `.md`, or (no FILE) records first like the default command | `.md` with a summary block inserted at the top + tags; updated `index.md` |
 | `mic2md tag [FILES...] \| --all` | Existing session `.md` file(s) | Same file(s) with `tags:` front matter updated; updated `index.md` |
-| `mic2md reindex` | All files under `transcripts/` (and any flat legacy files) | Migrated file layout + regenerated `index.md` |
+| `mic2md reindex` | All files under `transcripts/` (and any flat or pre-type `transcripts/YYYY-MM/` legacy files, moved to `transcripts/meeting/`) | Migrated file layout + regenerated `index.md` |
 | `mic2md models` | Local model cache + static registry | Table printed to stderr (read-only, no file output) |
 
 Logical entities per component: **Recorder** manages audio frames in flight and the
