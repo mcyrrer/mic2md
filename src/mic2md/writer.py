@@ -4,9 +4,30 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timedelta
+from enum import StrEnum
 from pathlib import Path
 
 TRANSCRIPTS_DIR = "transcripts"
+
+
+class SessionType(StrEnum):
+    """What a recording is; the value is both the ``type:`` front matter and the folder name."""
+
+    meeting = "meeting"
+    thoughts = "thoughts"
+
+
+DEFAULT_TYPE = SessionType.meeting
+
+
+def session_type(meta: dict[str, str]) -> SessionType:
+    """The session's type from its front matter; files without one (or unknown) are meetings."""
+    try:
+        return SessionType(meta.get("type", "").strip().lower())
+    except ValueError:
+        return DEFAULT_TYPE
+
+
 _FRONT_MATTER = re.compile(r"\A---\n(.*?)\n---\n", re.S)
 # Files polished by older versions kept the raw transcript in a <details> section.
 _RAW_SECTION = re.compile(
@@ -49,9 +70,17 @@ def session_filename(started: datetime, title: str = "") -> str:
     return started.strftime("%Y-%m-%dT%H-%M-%S") + suffix + ".md"
 
 
-def session_path(output_dir: Path, started: datetime, title: str = "") -> Path:
-    """``<output_dir>/transcripts/YYYY-MM/<ISO timestamp>[-<title slug>].md``."""
-    return output_dir / TRANSCRIPTS_DIR / f"{started:%Y-%m}" / session_filename(started, title)
+def session_path(
+    output_dir: Path,
+    started: datetime,
+    title: str = "",
+    session_type: SessionType = DEFAULT_TYPE,
+) -> Path:
+    """``<output_dir>/transcripts/<type>/YYYY-MM/<ISO timestamp>[-<title slug>].md``."""
+    month = f"{started:%Y-%m}"
+    return (
+        output_dir / TRANSCRIPTS_DIR / session_type.value / month / session_filename(started, title)
+    )
 
 
 def format_duration(td: timedelta) -> str:
@@ -132,13 +161,16 @@ class SessionWriter:
         language: str,
         whisper_model: str,
         extra_meta: dict[str, str] | None = None,
+        session_type: SessionType = DEFAULT_TYPE,
     ) -> None:
         self.started = started.astimezone()
-        self.path = session_path(output_dir, self.started, (extra_meta or {}).get("meeting", ""))
+        title = (extra_meta or {}).get("meeting", "")
+        self.path = session_path(output_dir, self.started, title, session_type)
         self.meta = {
             "date": self.started.isoformat(timespec="seconds"),
             "language": language,
             "whisper_model": whisper_model,
+            "type": session_type.value,
             **(extra_meta or {}),
         }
         self.lines: list[str] = []
@@ -188,16 +220,16 @@ def extract_summary(text: str) -> str | None:
 
 
 def import_document(output_dir: Path, started: datetime, meta: dict[str, str], body: str) -> Path:
-    """Copy an external text into ``transcripts/YYYY-MM/`` as a session file.
+    """Copy an external text into ``transcripts/<type>/YYYY-MM/`` as a session file.
 
     If a session already uses that second, the next free second is taken so the file name
     keeps the session pattern (and shows up in the index).
     """
-    title = meta.get("meeting", "")
-    path = session_path(output_dir, started, title)
+    title, kind = meta.get("meeting", ""), session_type(meta)
+    path = session_path(output_dir, started, title, kind)
     while path.exists():
         started += timedelta(seconds=1)
-        path = session_path(output_dir, started, title)
+        path = session_path(output_dir, started, title, kind)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(render_front_matter(meta) + "\n" + body.strip() + "\n", encoding="utf-8")

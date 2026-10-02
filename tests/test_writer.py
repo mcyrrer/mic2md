@@ -156,7 +156,7 @@ def test_import_document_uses_session_pattern_and_avoids_collisions(tmp_path):
     first = import_document(tmp_path, when, meta, "Some notes.")
     second = import_document(tmp_path, when, meta, "Other notes.")
     assert (
-        first.relative_to(tmp_path).as_posix() == "transcripts/2026-09/2026-09-01T14-00-00-ext.md"
+        first.relative_to(tmp_path).as_posix() == "transcripts/meeting/2026-09/2026-09-01T14-00-00-ext.md"
     )
     assert second.name == "2026-09-01T14-00-01-ext.md"
     got_meta, body = split_front_matter(first.read_text())
@@ -227,3 +227,35 @@ def test_insert_summary_keeps_notes_block(tmp_path):
     path.write_text(text, encoding="utf-8")
     insert_summary(path, {"date": "x"}, text, "Summary.")
     assert extract_notes(path.read_text(encoding="utf-8")) == ["[00:00:01] n1"]
+
+
+def test_session_type_folder_and_front_matter(tmp_path):
+    from mic2md.writer import SessionType, session_path
+
+    when = datetime(2026, 10, 2, 9, 0, 0)
+    assert session_path(tmp_path, when).relative_to(tmp_path).as_posix() == (
+        "transcripts/meeting/2026-10/2026-10-02T09-00-00.md"
+    )
+    w = SessionWriter(tmp_path, when, "en", "m", session_type=SessionType.thoughts)
+    assert w.path.relative_to(tmp_path).as_posix() == (
+        "transcripts/thoughts/2026-10/2026-10-02T09-00-00.md"
+    )
+    assert parse_document(w.path.read_text())[0]["type"] == "thoughts"
+
+
+def test_session_type_defaults_to_meeting():
+    from mic2md.writer import SessionType, session_type
+
+    assert session_type({}) is SessionType.meeting
+    assert session_type({"type": "podcast"}) is SessionType.meeting
+    assert session_type({"type": " Thoughts "}) is SessionType.thoughts
+
+
+def test_import_document_uses_type_folder(tmp_path):
+    from mic2md.writer import import_document
+
+    when = datetime(2026, 10, 2, 9, 0, 0)
+    path = import_document(tmp_path, when, {"type": "thoughts"}, "An idea.")
+    assert path.relative_to(tmp_path).as_posix() == (
+        "transcripts/thoughts/2026-10/2026-10-02T09-00-00.md"
+    )
