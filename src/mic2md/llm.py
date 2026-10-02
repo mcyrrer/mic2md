@@ -1,4 +1,4 @@
-"""LLM passes: polish the transcript into Markdown, and summarize it as meeting notes.
+"""LLM passes: polish the transcript into Markdown, and summarize it (meeting notes, thoughts).
 
 Backends: a local Ollama server (default), Claude via `claude -p`, or GitHub Copilot via
 `copilot -p`.
@@ -109,8 +109,49 @@ unclear) and include what they add, but don't quote them as something a speaker 
 - Output only these sections: no title, no preamble, no explanations, no code fences."""
 
 
+THOUGHTS_SUMMARY_PROMPT = """\
+You are an assistant that turns a person's spoken thoughts (a solo recording, not a meeting) \
+into clear notes they can come back to later.
+
+Read the transcript and produce the following sections, as Markdown with `## ` headings. \
+Write the headings and all content in {language}.
+
+1. Summary
+   3–5 sentences: what the person was thinking about and where they landed.
+
+2. Key ideas
+   A list of the main ideas, insights or arguments, each in one or two sentences.
+
+3. Open questions
+   Questions the person raised, doubts, or things they said they don't know yet.
+
+4. Next steps
+   A list of concrete things to do, each starting with a verb (e.g. "Draft the outline \
+for the blog post"). Include implicit intentions ("I should look into that"). If there are \
+none, write "None mentioned."
+
+5. Connections / themes
+   Recurring themes, or links between ideas that the person made. Leave this section out \
+if there are none.
+
+Rules:
+- Only use information from the transcript. Do not invent names, dates, or details.
+- If the transcript has times like `[00:12:31]` or `(00:12:31)`, add the time where an idea \
+or next step came up, e.g. "(00:12:31)".
+- If the transcript is unclear, flag it with "[unclear]".
+- Notes inside <notes> were typed by the user while recording; they were not said aloud. \
+Treat them as reliable context and include what they add.
+- Ignore filler words and false starts. Keep the person's own way of framing ideas.
+- Keep it concise.
+- Output only these sections: no title, no preamble, no explanations, no code fences."""
+
+# Summary prompt per session type (writer.SessionType values); others use the meeting one.
+SUMMARY_PROMPTS = {"meeting": SUMMARY_PROMPT, "thoughts": THOUGHTS_SUMMARY_PROMPT}
+
+
 TAGS_PROMPT = """\
-You pick tags for meeting notes so that notes about the same topic can be found together later.
+You pick tags for notes (meetings and recorded thoughts) so that notes about the same topic \
+can be found together later.
 
 Read the transcript and return 3 to 8 tags for its most important topics: projects, products, \
 customers, teams, technologies, decisions areas and recurring themes. Prefer specific topics \
@@ -212,15 +253,17 @@ def build_summary_messages(
     participants: str = "",
     terms: list[str] | None = None,
     notes: list[str] | None = None,
+    session_type: str = "meeting",
 ) -> list[dict[str, str]]:
     lang = LANGUAGE_NAMES.get(language, language)
+    prompt = SUMMARY_PROMPTS.get(session_type, SUMMARY_PROMPT)
     context = ""
     if meeting:
         context += f"Meeting: {meeting}\n"
     if participants:
         context += f"Invited participants (from the calendar): {participants}\n"
     return [
-        {"role": "system", "content": SUMMARY_PROMPT.format(language=lang) + terms_rule(terms)},
+        {"role": "system", "content": prompt.format(language=lang) + terms_rule(terms)},
         {
             "role": "user",
             "content": f"{context}Transcript:\n\n<transcript>\n{transcript}\n</transcript>"
@@ -234,7 +277,7 @@ def notes_block(notes: list[str] | None) -> str:
     if not notes:
         return ""
     return (
-        "\n\nNotes the user typed during the meeting (times are into the recording):\n\n"
+        "\n\nNotes the user typed while recording (times are into the recording):\n\n"
         "<notes>\n" + "\n".join(notes) + "\n</notes>"
     )
 
@@ -324,12 +367,16 @@ def summarize(
     backend: str = OLLAMA,
     terms: list[str] | None = None,
     notes: list[str] | None = None,
+    session_type: str = "meeting",
 ) -> str:
-    """Stream meeting notes (summary, decisions, action items…) for ``transcript``.
+    """Stream notes for ``transcript``: for a meeting a summary, decisions and action items,
+    for thoughts a summary, key ideas and next steps (``session_type`` picks the prompt).
 
     ``notes`` are what the user typed while recording, as ``[HH:MM:SS] text`` lines.
     """
-    messages = build_summary_messages(transcript, language, meeting, participants, terms, notes)
+    messages = build_summary_messages(
+        transcript, language, meeting, participants, terms, notes, session_type
+    )
     return chat(messages, model, url, on_token, timeout, backend)
 
 
