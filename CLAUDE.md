@@ -28,8 +28,8 @@ uv tool install --reinstall .         # install/update the global `mic2md` comma
 ```
 src/mic2md/
   cli.py          Typer app. `main` (record + summarize, via `ctx.invoke(summarize)`),
-                  `polish FILE` (alias `p`), `summarize [FILE]` (alias `s`), `tag`, `reindex`,
-                  `models`. Recorder class = main loop.
+                  `polish FILE` (alias `p`), `summarize [FILE]` (alias `s`), `notes` (alias
+                  `n`), `tag`, `reindex`, `models`. Recorder class = main loop.
   audio.py        MicStream (sounddevice → queue of 30 ms float32 frames) + Segmenter (utterances;
                   speech decided by a detector, or an energy threshold without one)
   vad.py          SileroDetector (pysilero-vad): 30 ms frames → 512-sample chunks, hysteresis
@@ -132,7 +132,10 @@ lauche.sh         Legacy record-then-transcribe script (predecessor, kept for re
   for date/language/type, and meeting/participants for meetings, on a TTY, defaults
   otherwise) and `writer.import_document`, which copies it into `transcripts/<type>/YYYY-MM/`
   under a free
-  session name. The source file is never modified.
+  session name. The source file is never modified. `notes` does the same for text read from
+  stdin (paste + Ctrl+D, or a pipe) with `source: pasted`, and never calls the LLM. Both
+  ask through `_ask_front_matter` (`_interactive()` = stdin is a TTY; on a TTY, stdin can
+  still be read after the Ctrl+D that ended the paste).
 - **File names** come from `writer.session_filename`: `%Y-%m-%dT%H-%M-%S.md`, ISO 8601 with
   `-` instead of `:`, plus a `-<slug>` suffix (`slugify_title`, lowercase-hyphenated, max 20
   chars) when a meeting title is known. `index._SESSION_NAME` and `migrate_flat` must accept

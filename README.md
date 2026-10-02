@@ -112,6 +112,11 @@ Index updated: ~/Documents/mic2md/index.md
   asked for the date, language, type and (for meetings) meeting name and participants, it's
   copied into `transcripts/<type>/YYYY-MM/` with that front matter plus `source:` (the original path), and the
   original is left untouched. The LLM then works on the copy, which shows up in `index.md`.
+- **Paste a transcript.** `mic2md notes` (`mic2md n`) saves text you paste, e.g. a Teams
+  transcript: paste it, press Ctrl+D on an empty line, answer the same questions as for an
+  import, and it is stored as is (`source: pasted`) in `transcripts/<type>/YYYY-MM/` and
+  listed in `index.md`. No LLM is involved; run `polish`, `summarize` or `tag` on it later if
+  you want. Piping works too: `pbpaste | mic2md n -T meeting`.
 - **Topic tags.** After polishing (and in `polish` / `summarize`) the LLM adds up to 8 topic
   tags to the front matter, e.g. `tags: [q4-budget, hiring]`. It is shown the tags your other
   notes already use and reuses them when they fit, so related meetings share tags. They also
@@ -146,6 +151,7 @@ mic2md s                                # same, short name (`p` = polish)
 mic2md -m small.en --no-calendar summarize   # recording options go before the command
 mic2md summarize FILE -b claude --llm opus   # meeting notes from Claude Opus
 mic2md summarize FILE -b copilot        # meeting notes via GitHub Copilot CLI
+mic2md n                                # paste a transcript (e.g. Teams), save it as is
 mic2md --llm gemma4:latest              # use a different Ollama model
 mic2md -o ~/notes/dictation             # save somewhere else
 mic2md --list-devices                   # show microphones
@@ -178,6 +184,7 @@ Without a command, `mic2md` records, polishes and summarizes. `p` and `s` are sh
 |---|---|
 | `polish FILE` (`p`) | Re-run the LLM polish on a session file (keeps an existing summary); imports files from outside the output folder first |
 | `summarize [FILE]` (`s`) | Add meeting notes to the top of a session file; imports files from outside the output folder first. Without FILE: record a new meeting, polish it, then summarize it |
+| `notes` (`n`) | Paste a transcript (end with Ctrl+D, or pipe it in) and save it as a session without any LLM pass; asks for date, language, type and meeting |
 | `tag [FILE...] [--all]` | Add topic tags. Named files are always re-tagged; `--all` picks every session without tags |
 | `reindex` | Rebuild `index.md` and move sessions saved by older versions into `transcripts/meeting/YYYY-MM/` |
 | `models` | List Whisper models and which are downloaded |

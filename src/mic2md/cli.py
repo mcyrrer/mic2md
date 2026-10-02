@@ -1074,15 +1074,31 @@ def _import_external(
         f"[bold]{escape(file.name)}[/] is outside {escape(str(output_dir))}; importing it.",
         soft_wrap=True,
     )
-    interactive = sys.stdin.isatty()
-    if not interactive:
-        console.print("[dim]Not a terminal; using defaults for the front matter.[/]")
+    when, front = _ask_front_matter(meta, default_when, default_lang, kind or session_type(meta))
+    front["source"] = str(file.resolve())
+    path = import_document(output_dir, when, front, body)
+    console.print(f"[green]✔ Imported to[/] {path}", soft_wrap=True)
+    return path
 
+
+def _interactive() -> bool:
+    return sys.stdin.isatty()
+
+
+def _ask_front_matter(
+    meta: dict[str, str], default_when: datetime, default_lang: str, kind: SessionType
+) -> tuple[datetime, dict[str, str]]:
+    """Ask for date, language, type and (meetings) name and participants of an imported text.
+
+    Without a terminal the defaults are used. Returns the start time and the front matter
+    (``meta`` with those fields set).
+    """
     when = default_when
     language, meeting = default_lang, meta.get("meeting", "")
     participants = meta.get("participants", "")
-    kind = kind or session_type(meta)
-    if interactive:
+    if not _interactive():
+        console.print("[dim]Not a terminal; using defaults for the front matter.[/]")
+    else:
         while (
             answer := _parse_when(_ask("Date and time", f"{default_when:%Y-%m-%d %H:%M}"))
         ) is None:
@@ -1099,19 +1115,14 @@ def _import_external(
             participants = _normalize_participants(
                 _ask("Participants, comma-separated", participants)
             )
-
-    front = {
+    return when, {
         **meta,
         "date": when.isoformat(timespec="seconds"),
         "language": language,
         "type": kind.value,
         "meeting": meeting,
         "participants": participants,
-        "source": str(file.resolve()),
     }
-    path = import_document(output_dir, when, front, body)
-    console.print(f"[green]✔ Imported to[/] {path}", soft_wrap=True)
-    return path
 
 
 def _record_for_summary(
@@ -1276,6 +1287,49 @@ def _summarize(
 
 
 @app.command()
+def notes(
+    ctx: typer.Context,
+    lang: Annotated[
+        Lang | None, typer.Option("--lang", "-l", help="Language of the text (default: en).")
+    ] = None,
+    output_dir: Annotated[
+        Path,
+        typer.Option(
+            "--output-dir",
+            "-o",
+            envvar="MIC2MD_OUTPUT_DIR",
+            file_okay=False,
+            help="Folder that holds index.md and transcripts/.",
+        ),
+    ] = DEFAULT_OUTPUT_DIR,
+    session_type: TypeOpt = None,
+) -> None:
+    """Save a pasted transcript (e.g. from Teams) as a session, as is: no polish or summary.
+
+    Paste the text and press Ctrl+D on an empty line, or pipe it in: [bold]pbpaste | mic2md
+    n[/]. You're asked for the date, language, type and meeting like when importing a file.
+    It lands in transcripts/<type>/YYYY-MM/ and in index.md; run `polish`, `summarize` or
+    `tag` on it later if you want.
+    """
+    lang = _inherit(ctx, "lang", lang)
+    output_dir = _inherit(ctx, "output_dir", output_dir).expanduser().resolve()
+    kind = _inherit(ctx, "session_type", session_type) or DEFAULT_TYPE
+    if _interactive():
+        console.print("Paste the transcript, then press [bold]Ctrl+D[/] on an empty line.")
+    body = sys.stdin.read()
+    if not body.strip():
+        console.print("[red]Nothing pasted; no file saved.[/]")
+        raise typer.Exit(1)
+    when, front = _ask_front_matter(
+        {}, datetime.now().astimezone(), lang.value if lang else "en", kind
+    )
+    front["source"] = "pasted"
+    path = import_document(output_dir, when, front, body)
+    _update_index(output_dir)
+    console.print(f"[green]✔ Saved[/] {path}", soft_wrap=True)
+
+
+@app.command()
 def tag(
     ctx: typer.Context,
     files: Annotated[
@@ -1383,6 +1437,7 @@ def list_models() -> None:
 # Short names. short_help is for the command list; `mic2md s --help` shows the full help.
 app.command("p", short_help="Short for polish.")(polish)
 app.command("s", short_help="Short for summarize.")(summarize)
+app.command("n", short_help="Short for notes.")(notes)
 
 
 if __name__ == "__main__":
