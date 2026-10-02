@@ -156,7 +156,8 @@ def test_import_document_uses_session_pattern_and_avoids_collisions(tmp_path):
     first = import_document(tmp_path, when, meta, "Some notes.")
     second = import_document(tmp_path, when, meta, "Other notes.")
     assert (
-        first.relative_to(tmp_path).as_posix() == "transcripts/meeting/2026-09/2026-09-01T14-00-00-ext.md"
+        first.relative_to(tmp_path).as_posix()
+        == "transcripts/meeting/2026-09/2026-09-01T14-00-00-ext.md"
     )
     assert second.name == "2026-09-01T14-00-01-ext.md"
     got_meta, body = split_front_matter(first.read_text())

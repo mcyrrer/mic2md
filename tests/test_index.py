@@ -13,7 +13,10 @@ def _session(root, started, meeting):
 
 def test_sessions_are_stored_by_year_month(tmp_path):
     path = _session(tmp_path, datetime(2026, 9, 23, 20, 5, 7), "")
-    assert path.relative_to(tmp_path).as_posix() == "transcripts/meeting/2026-09/2026-09-23T20-05-07.md"
+    assert (
+        path.relative_to(tmp_path).as_posix()
+        == "transcripts/meeting/2026-09/2026-09-23T20-05-07.md"
+    )
 
 
 def test_index_lists_all_sessions_newest_first_grouped_by_month(tmp_path):
@@ -28,8 +31,7 @@ def test_index_lists_all_sessions_newest_first_grouped_by_month(tmp_path):
     assert text.index("2026-09-24") < text.index("2026-09-23")
     assert (
         "| [2026-09-23](transcripts/meeting/2026-09/2026-09-23T20-05-07-sprint-planning.md) "
-        "| 20:05 | meeting | Sprint planning |"
-        in text
+        "| 20:05 | meeting | Sprint planning |" in text
     )
     assert "| 08:30 | meeting |  |" in text
     assert "| Date | Time | Type | Title | Tags |" in text
@@ -136,7 +138,8 @@ def test_index_has_tag_section_and_repo_footer(tmp_path):
     tags = text[text.index("## Tags") :]
     assert tags.index("`hiring` (1)") < tags.index("`q4-budget` (2)")
     assert (
-        "- `q4-budget` (2): [2026-09-27 09:00](transcripts/meeting/2026-09/2026-09-27T09-00-00.md), "
+        "- `q4-budget` (2): "
+        "[2026-09-27 09:00](transcripts/meeting/2026-09/2026-09-27T09-00-00.md), "
         "[2026-09-20 09:00 Budget sync]"
         "(transcripts/meeting/2026-09/2026-09-20T09-00-00-budget-sync.md)"
     ) in tags
