@@ -685,3 +685,179 @@ def test_meeting_meta_none_of_these_asks_for_a_name(monkeypatch):
     monkeypatch.setattr(cli.console, "input", lambda prompt: next(replies))
     monkeypatch.setattr(cli.console, "print", lambda *a, **k: None)
     assert cli._meeting_meta() == {"meeting": "Planning", "participants": "Ada, Bob"}
+
+
+def test_thoughts_skip_the_calendar(monkeypatch):
+    from mic2md import cli
+    from mic2md.writer import SessionType
+
+    monkeypatch.setattr(cli, "_meeting_meta", lambda: {"meeting": "Standup", "participants": ""})
+    assert cli._session_meta(cli.RecordOptions()) == {"meeting": "Standup", "participants": ""}
+    assert cli._session_meta(cli.RecordOptions(no_calendar=True)) == {}
+    monkeypatch.setattr(cli, "_meeting_meta", lambda: pytest.fail("calendar used for thoughts"))
+    assert cli._session_meta(cli.RecordOptions(session_type=SessionType.thoughts)) == {}
+
+
+def test_type_option_reaches_the_recording(tmp_path, monkeypatch):
+    from datetime import datetime
+
+    from typer.testing import CliRunner
+
+    from mic2md import cli
+    from mic2md.writer import SessionType
+
+    seen = []
+
+    def fake_record(
+        opts, backend, llm_model, ollama_url, output_dir, terms=None, tag=True, stack=None
+    ):
+        seen.append(opts.session_type)
+        writer = cli.SessionWriter(
+            output_dir, datetime(2026, 10, 2, 9), "en", "m", session_type=opts.session_type
+        )
+        writer.append("an idea")
+        writer.finalize("# Idea\n\nAn idea.", "qwen", datetime(2026, 10, 2, 9, 5))
+        return writer, "# Idea\n\nAn idea."
+
+    monkeypatch.setattr(cli, "_record", fake_record)
+    monkeypatch.setattr(cli, "_stream_llm", _fake_llm("## Summary\n\nAn idea."))
+    monkeypatch.delenv("MIC2MD_TYPE", raising=False)
+    runner = CliRunner()
+    assert runner.invoke(cli.app, ["-o", str(tmp_path / "a")]).exit_code == 0
+    assert runner.invoke(cli.app, ["-T", "thoughts", "-o", str(tmp_path / "b")]).exit_code == 0
+    args = ["summarize", "--type", "thoughts", "-o", str(tmp_path / "c")]
+    assert runner.invoke(cli.app, args).exit_code == 0
+    assert seen == [SessionType.meeting, SessionType.thoughts, SessionType.thoughts]
+    assert list((tmp_path / "b" / "transcripts" / "thoughts").rglob("*.md"))
+
+
+def _capture_summary_type(monkeypatch):
+    """Fake LLM pass that runs the real summarize call against a stub llm.summarize."""
+    from mic2md import cli
+
+    seen = {}
+
+    def fake_summarize(transcript, language, **kwargs):
+        seen.update(kwargs)
+        return "## Summary"
+
+    def fake(task, backend, model, url, call, fallback, quiet=False):
+        return ["idea"] if task == "tagging" else call(None)
+
+    monkeypatch.setattr(cli.llm, "summarize", fake_summarize)
+    monkeypatch.setattr(cli, "_stream_llm", fake)
+    return seen
+
+
+def test_import_as_thoughts_lands_in_thoughts_folder(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from mic2md import cli
+
+    seen = _capture_summary_type(monkeypatch)
+    ext = tmp_path / "elsewhere" / "idea.md"
+    ext.parent.mkdir()
+    ext.write_text("Maybe we should rewrite the parser.\n")
+    out = tmp_path / "out"
+
+    args = ["summarize", str(ext), "-o", str(out), "-T", "thoughts"]
+    result = CliRunner().invoke(cli.app, args, input="")
+
+    assert result.exit_code == 0, result.output
+    (imported,) = (out / "transcripts" / "thoughts").rglob("*.md")
+    assert "type: thoughts" in imported.read_text()
+    assert seen["session_type"] == "thoughts"
+    assert "| thoughts |" in (out / "index.md").read_text()
+
+
+def test_summarize_file_uses_its_type(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from mic2md import cli
+
+    seen = _capture_summary_type(monkeypatch)
+    f = tmp_path / "transcripts" / "thoughts" / "2026-10" / "2026-10-02T09-00-00.md"
+    f.parent.mkdir(parents=True)
+    f.write_text("---\nlanguage: en\ntype: thoughts\n---\n\n# Idea\n\nBody.\n")
+
+    result = CliRunner().invoke(cli.app, ["summarize", str(f), "-o", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert seen["session_type"] == "thoughts"
+
+
+def _no_llm(monkeypatch):
+    from mic2md import cli
+
+    def fail(*a, **k):
+        pytest.fail("notes must not call the LLM")
+
+    monkeypatch.setattr(cli, "_stream_llm", fail)
+    monkeypatch.setattr(cli.llm, "chat", fail)
+    monkeypatch.setattr(cli.llm, "check", fail)
+
+
+def test_notes_saves_pasted_text_verbatim(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from mic2md import cli
+    from mic2md.writer import split_front_matter
+
+    _no_llm(monkeypatch)
+    monkeypatch.delenv("MIC2MD_TYPE", raising=False)
+    pasted = "Anna: um, we ship Friday?\n\nBo: yes.\n"
+
+    result = CliRunner().invoke(cli.app, ["notes", "-o", str(tmp_path)], input=pasted)
+
+    assert result.exit_code == 0, result.output
+    (saved,) = (tmp_path / "transcripts" / "meeting").rglob("*.md")
+    meta, body = split_front_matter(saved.read_text())
+    assert body.strip() == pasted.strip()
+    assert meta["type"] == "meeting" and meta["source"] == "pasted"
+    assert meta["language"] == "en" and meta["date"]
+    assert saved.name in (tmp_path / "index.md").read_text()
+
+
+def test_notes_alias_type_and_language(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from mic2md import cli
+
+    _no_llm(monkeypatch)
+    args = ["n", "-T", "thoughts", "-l", "sv", "-o", str(tmp_path)]
+    result = CliRunner().invoke(cli.app, args, input="En tanke.\n")
+
+    assert result.exit_code == 0, result.output
+    (saved,) = (tmp_path / "transcripts" / "thoughts").rglob("*.md")
+    text = saved.read_text()
+    assert "type: thoughts" in text and "language: sv" in text
+
+
+def test_notes_asks_the_import_questions_on_a_terminal(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from mic2md import cli
+
+    _no_llm(monkeypatch)
+    answers = iter(["2026-09-30 14:00", "en", "meeting", "Teams sync", "Ada,Bo"])
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    monkeypatch.setattr(cli, "_ask", lambda q, default="": next(answers))
+
+    result = CliRunner().invoke(cli.app, ["notes", "-o", str(tmp_path)], input="Hi.\n")
+
+    assert result.exit_code == 0, result.output
+    (saved,) = (tmp_path / "transcripts" / "meeting" / "2026-09").glob("*.md")
+    assert saved.name == "2026-09-30T14-00-00-teams-sync.md"
+    text = saved.read_text()
+    assert "meeting: Teams sync" in text and "participants: Ada, Bo" in text
+
+
+def test_notes_with_nothing_pasted_saves_nothing(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from mic2md import cli
+
+    _no_llm(monkeypatch)
+    result = CliRunner().invoke(cli.app, ["notes", "-o", str(tmp_path)], input="  \n")
+    assert result.exit_code == 1
+    assert not (tmp_path / "transcripts").exists()

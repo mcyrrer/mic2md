@@ -25,6 +25,8 @@ from mic2md.audio import SAMPLE_RATE, MicStream, Segmenter, list_input_devices
 from mic2md.transcriber import build_vocabulary, mark_uncertain, read_glossary
 from mic2md.ui import LiveView, LlmProgress, highlight_uncertain
 from mic2md.writer import (
+    DEFAULT_TYPE,
+    SessionType,
     SessionWriter,
     extract_notes,
     extract_summary,
@@ -32,6 +34,7 @@ from mic2md.writer import (
     import_document,
     insert_summary,
     parse_document,
+    session_type,
     split_front_matter,
     update_front_matter,
     write_final,
@@ -87,6 +90,16 @@ ModelOpt = Annotated[
         "copilot: e.g. gpt-5.4 (default: Copilot's own).",
     ),
 ]
+TypeOpt = Annotated[
+    SessionType | None,
+    typer.Option(
+        "--type",
+        "-T",
+        envvar="MIC2MD_TYPE",
+        help="Kind of recording: meeting (calendar lookup, meeting notes; the default) or "
+        "thoughts (no calendar, ideas and next steps). Sets the folder under transcripts/.",
+    ),
+]
 GLOSSARY_FILE = "glossary.txt"
 GlossaryOpt = Annotated[
     Path | None,
@@ -134,7 +147,15 @@ def _print_devices() -> None:
 
 
 # Options that may also be given before a subcommand (`mic2md -b claude summarize F`).
-SHARED_OPTIONS = ("lang", "backend", "llm_model", "ollama_url", "output_dir", "glossary")
+SHARED_OPTIONS = (
+    "lang",
+    "backend",
+    "llm_model",
+    "ollama_url",
+    "output_dir",
+    "glossary",
+    "session_type",
+)
 
 
 def _from_command_line(ctx: typer.Context, name: str) -> bool:
@@ -202,6 +223,13 @@ def _meeting_meta() -> dict[str, str]:
         "meeting": _ask("Meeting name"),
         "participants": _normalize_participants(_ask("Participants, comma-separated")),
     }
+
+
+def _session_meta(opts: RecordOptions) -> dict[str, str]:
+    """Meeting front matter for a new recording; thoughts never look at the calendar."""
+    if opts.session_type is not SessionType.meeting or opts.no_calendar:
+        return {}
+    return _meeting_meta()
 
 
 def _meeting_line(meeting) -> str:
@@ -737,12 +765,14 @@ def main(
     list_devices: Annotated[
         bool, typer.Option("--list-devices", help="List microphones and exit.")
     ] = False,
+    session_type: TypeOpt = None,
     version: Annotated[
         bool | None, typer.Option("--version", callback=_version, is_eager=True)
     ] = None,
 ) -> None:
     """Record from the microphone until Ctrl+C, then polish and summarize (like `summarize`)."""
     opts = RecordOptions(
+        session_type=session_type or DEFAULT_TYPE,
         lang=lang,
         model_size=model_size,
         model_path=model_path,
@@ -765,6 +795,7 @@ def main(
             "ollama_url": ollama_url,
             "output_dir": output_dir,
             "glossary": glossary,
+            "session_type": session_type,
         }
         ctx.obj = {n: values[n] for n in SHARED_OPTIONS if _from_command_line(ctx, n)}
         # For `summarize` without a file, which records first.
@@ -784,6 +815,7 @@ def main(
         llm_model=llm_model,
         ollama_url=ollama_url,
         glossary=glossary,
+        session_type=None,
     )
 
 
@@ -818,6 +850,7 @@ class RecordOptions:
     beam_size: int = 5
     show_transcript: bool = False
     fullscreen: bool = True
+    session_type: SessionType = DEFAULT_TYPE
 
 
 def _done() -> None:
@@ -872,12 +905,19 @@ def _record(
     with console.status(f"Loading Whisper model [cyan]{model_name}[/]…"):
         transcriber = Transcriber(path, language, beam_size=opts.beam_size)
 
-    meeting_meta = {} if opts.no_calendar else _meeting_meta()
+    meeting_meta = _session_meta(opts)
     transcriber.vocabulary = build_vocabulary(
         meeting_meta.get("meeting", ""), meeting_meta.get("participants", ""), terms or []
     )
     started = datetime.now()
-    writer = SessionWriter(output_dir, started, language, model_name, extra_meta=meeting_meta)
+    writer = SessionWriter(
+        output_dir,
+        started,
+        language,
+        model_name,
+        extra_meta=meeting_meta,
+        session_type=opts.session_type,
+    )
     view = LiveView(
         language,
         model_name,
@@ -885,6 +925,7 @@ def _record(
         meeting=meeting_meta.get("meeting", ""),
         participants=meeting_meta.get("participants", ""),
         path=str(writer.path),
+        session_type=opts.session_type.value,
     )
     recorder = Recorder(
         transcriber,
@@ -974,11 +1015,13 @@ def polish(
         str, typer.Option("--ollama-url", envvar="OLLAMA_HOST", help="Ollama server URL.")
     ] = llm.DEFAULT_URL,
     glossary: GlossaryOpt = None,
+    session_type: TypeOpt = None,
 ) -> None:
     """Re-run the LLM polish on a session file (on the raw transcript if present).
 
-    A file from outside the output folder is copied into transcripts/YYYY-MM/ first, with
-    front matter you are asked for; the original is left untouched.
+    A file from outside the output folder is copied into transcripts/<type>/YYYY-MM/ first,
+    with front matter you are asked for (--type sets the default type); the original is left
+    untouched.
     """
     lang = _inherit(ctx, "lang", lang)
     backend = _inherit(ctx, "backend", backend)
@@ -988,7 +1031,7 @@ def polish(
     terms = _glossary_terms(_inherit(ctx, "glossary", glossary), output_dir)
     imported = not file.resolve().is_relative_to(output_dir)
     if imported:
-        file = _import_external(file, output_dir, lang)
+        file = _import_external(file, output_dir, lang, _inherit(ctx, "session_type", session_type))
         _update_index(output_dir)
     text = file.read_text(encoding="utf-8")
     meta, raw = parse_document(text)
@@ -1011,8 +1054,13 @@ def polish(
     _emit_stdout(polished)
 
 
-def _import_external(file: Path, output_dir: Path, lang: Lang | None) -> Path:
-    """Copy a file from outside the output folder into it, asking for the front matter."""
+def _import_external(
+    file: Path, output_dir: Path, lang: Lang | None, kind: SessionType | None = None
+) -> Path:
+    """Copy a file from outside the output folder into it, asking for the front matter.
+
+    The type defaults to ``kind`` (--type), else the file's own ``type:``, else meeting.
+    """
     meta, body = split_front_matter(file.read_text(encoding="utf-8"))
     if not body.strip():
         console.print("[red]The file is empty.[/]")
@@ -1026,14 +1074,31 @@ def _import_external(file: Path, output_dir: Path, lang: Lang | None) -> Path:
         f"[bold]{escape(file.name)}[/] is outside {escape(str(output_dir))}; importing it.",
         soft_wrap=True,
     )
-    interactive = sys.stdin.isatty()
-    if not interactive:
-        console.print("[dim]Not a terminal; using defaults for the front matter.[/]")
+    when, front = _ask_front_matter(meta, default_when, default_lang, kind or session_type(meta))
+    front["source"] = str(file.resolve())
+    path = import_document(output_dir, when, front, body)
+    console.print(f"[green]✔ Imported to[/] {path}", soft_wrap=True)
+    return path
 
+
+def _interactive() -> bool:
+    return sys.stdin.isatty()
+
+
+def _ask_front_matter(
+    meta: dict[str, str], default_when: datetime, default_lang: str, kind: SessionType
+) -> tuple[datetime, dict[str, str]]:
+    """Ask for date, language, type and (meetings) name and participants of an imported text.
+
+    Without a terminal the defaults are used. Returns the start time and the front matter
+    (``meta`` with those fields set).
+    """
     when = default_when
     language, meeting = default_lang, meta.get("meeting", "")
     participants = meta.get("participants", "")
-    if interactive:
+    if not _interactive():
+        console.print("[dim]Not a terminal; using defaults for the front matter.[/]")
+    else:
         while (
             answer := _parse_when(_ask("Date and time", f"{default_when:%Y-%m-%d %H:%M}"))
         ) is None:
@@ -1041,20 +1106,23 @@ def _import_external(file: Path, output_dir: Path, lang: Lang | None) -> Path:
         when = answer
         while (language := _ask("Language (en/sv)", default_lang)) not in Lang.__members__:
             console.print("[yellow]Choose en or sv.[/]")
-        meeting = _ask("Meeting name", meeting)
-        participants = _normalize_participants(_ask("Participants, comma-separated", participants))
-
-    front = {
+        types = "/".join(t.value for t in SessionType)
+        while (answer := _ask(f"Type ({types})", kind.value)) not in SessionType.__members__:
+            console.print(f"[yellow]Choose {types.replace('/', ' or ')}.[/]")
+        kind = SessionType(answer)
+        if kind is SessionType.meeting:
+            meeting = _ask("Meeting name", meeting)
+            participants = _normalize_participants(
+                _ask("Participants, comma-separated", participants)
+            )
+    return when, {
         **meta,
         "date": when.isoformat(timespec="seconds"),
         "language": language,
+        "type": kind.value,
         "meeting": meeting,
         "participants": participants,
-        "source": str(file.resolve()),
     }
-    path = import_document(output_dir, when, front, body)
-    console.print(f"[green]✔ Imported to[/] {path}", soft_wrap=True)
-    return path
 
 
 def _record_for_summary(
@@ -1066,6 +1134,7 @@ def _record_for_summary(
     output_dir: Path,
     terms: list[str],
     stack: ExitStack,
+    kind: SessionType | None = None,
 ) -> Path:
     """Record and polish a new session for `summarize`; returns its file.
 
@@ -1075,6 +1144,8 @@ def _record_for_summary(
     opts = (ctx.obj or {}).get(RECORD_KEY) or RecordOptions()
     if lang:
         opts.lang = lang
+    if kind:
+        opts.session_type = kind
     if opts.no_llm:
         console.print("[red]--no-llm can't be combined with summarize.[/]")
         raise typer.Exit(2)
@@ -1125,16 +1196,20 @@ def summarize(
         str, typer.Option("--ollama-url", envvar="OLLAMA_HOST", help="Ollama server URL.")
     ] = llm.DEFAULT_URL,
     glossary: GlossaryOpt = None,
+    session_type: TypeOpt = None,
 ) -> None:
-    """Add an executive summary, decisions and action items to the top of a session file.
+    """Add a summary (for meetings: decisions and action items) to the top of a session file.
 
     Without FILE it records a meeting first (like plain `mic2md`), polishes it and then
     summarizes it. Recording options such as -m, -d or --no-calendar go before the command:
     [bold]mic2md -m small.en summarize[/].
 
+    The summary follows the session's type (front matter `type:`): meeting notes for meetings,
+    key ideas and next steps for thoughts. --type picks the type of a new recording or import.
+
     Running it again replaces the previous summary. A file from outside the output folder is
-    copied into transcripts/YYYY-MM/ first, with front matter you are asked for; the original
-    is left untouched.
+    copied into transcripts/<type>/YYYY-MM/ first, with front matter you are asked for; the
+    original is left untouched.
     """
     lang = _inherit(ctx, "lang", lang)
     backend = _inherit(ctx, "backend", backend)
@@ -1142,9 +1217,10 @@ def summarize(
     ollama_url = _inherit(ctx, "ollama_url", ollama_url)
     output_dir = _inherit(ctx, "output_dir", output_dir).expanduser().resolve()
     terms = _glossary_terms(_inherit(ctx, "glossary", glossary), output_dir)
+    kind = _inherit(ctx, "session_type", session_type)
     with ExitStack() as stack:
         summary = _summarize(
-            ctx, file, lang, backend, llm_model, ollama_url, output_dir, terms, stack
+            ctx, file, lang, backend, llm_model, ollama_url, output_dir, terms, stack, kind
         )
         _done()
     _emit_stdout(summary)
@@ -1160,15 +1236,16 @@ def _summarize(
     output_dir: Path,
     terms: list[str],
     stack: ExitStack,
+    kind: SessionType | None = None,
 ) -> str:
     """The body of `summarize`; returns the summary that was inserted."""
     imported = False
     if file is None:
         file = _record_for_summary(
-            ctx, lang, backend, llm_model, ollama_url, output_dir, terms, stack
+            ctx, lang, backend, llm_model, ollama_url, output_dir, terms, stack, kind
         )
     elif imported := not file.resolve().is_relative_to(output_dir):
-        file = _import_external(file, output_dir, lang)
+        file = _import_external(file, output_dir, lang, kind)
         _update_index(output_dir)
     text = file.read_text(encoding="utf-8")
     meta, transcript = parse_document(text)
@@ -1192,6 +1269,7 @@ def _summarize(
             backend=backend.value,
             terms=terms,
             notes=extract_notes(text),
+            session_type=session_type(meta).value,
         ),
         "file left unchanged",
     )
@@ -1206,6 +1284,49 @@ def _summarize(
     _update_index(output_dir)
     _say(f"[green]✔ Updated[/] {file}", soft_wrap=True)
     return summary
+
+
+@app.command()
+def notes(
+    ctx: typer.Context,
+    lang: Annotated[
+        Lang | None, typer.Option("--lang", "-l", help="Language of the text (default: en).")
+    ] = None,
+    output_dir: Annotated[
+        Path,
+        typer.Option(
+            "--output-dir",
+            "-o",
+            envvar="MIC2MD_OUTPUT_DIR",
+            file_okay=False,
+            help="Folder that holds index.md and transcripts/.",
+        ),
+    ] = DEFAULT_OUTPUT_DIR,
+    session_type: TypeOpt = None,
+) -> None:
+    """Save a pasted transcript (e.g. from Teams) as a session, as is: no polish or summary.
+
+    Paste the text and press Ctrl+D on an empty line, or pipe it in: [bold]pbpaste | mic2md
+    n[/]. You're asked for the date, language, type and meeting like when importing a file.
+    It lands in transcripts/<type>/YYYY-MM/ and in index.md; run `polish`, `summarize` or
+    `tag` on it later if you want.
+    """
+    lang = _inherit(ctx, "lang", lang)
+    output_dir = _inherit(ctx, "output_dir", output_dir).expanduser().resolve()
+    kind = _inherit(ctx, "session_type", session_type) or DEFAULT_TYPE
+    if _interactive():
+        console.print("Paste the transcript, then press [bold]Ctrl+D[/] on an empty line.")
+    body = sys.stdin.read()
+    if not body.strip():
+        console.print("[red]Nothing pasted; no file saved.[/]")
+        raise typer.Exit(1)
+    when, front = _ask_front_matter(
+        {}, datetime.now().astimezone(), lang.value if lang else "en", kind
+    )
+    front["source"] = "pasted"
+    path = import_document(output_dir, when, front, body)
+    _update_index(output_dir)
+    console.print(f"[green]✔ Saved[/] {path}", soft_wrap=True)
 
 
 @app.command()
@@ -1289,7 +1410,7 @@ def reindex(
         ),
     ] = DEFAULT_OUTPUT_DIR,
 ) -> None:
-    """Rebuild index.md, moving sessions saved by older versions into transcripts/YYYY-MM/."""
+    """Rebuild index.md, moving sessions saved by older versions into transcripts/meeting/."""
     output_dir = _inherit(ctx, "output_dir", output_dir).expanduser()
     if not output_dir.is_dir():
         console.print(f"[red]No such folder:[/] {output_dir}")
@@ -1316,6 +1437,7 @@ def list_models() -> None:
 # Short names. short_help is for the command list; `mic2md s --help` shows the full help.
 app.command("p", short_help="Short for polish.")(polish)
 app.command("s", short_help="Short for summarize.")(summarize)
+app.command("n", short_help="Short for notes.")(notes)
 
 
 if __name__ == "__main__":

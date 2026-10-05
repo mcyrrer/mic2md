@@ -28,8 +28,8 @@ uv tool install --reinstall .         # install/update the global `mic2md` comma
 ```
 src/mic2md/
   cli.py          Typer app. `main` (record + summarize, via `ctx.invoke(summarize)`),
-                  `polish FILE` (alias `p`), `summarize [FILE]` (alias `s`), `tag`, `reindex`,
-                  `models`. Recorder class = main loop.
+                  `polish FILE` (alias `p`), `summarize [FILE]` (alias `s`), `notes` (alias
+                  `n`), `tag`, `reindex`, `models`. Recorder class = main loop.
   audio.py        MicStream (sounddevice → queue of 30 ms float32 frames) + Segmenter (utterances;
                   speech decided by a detector, or an energy threshold without one)
   vad.py          SileroDetector (pysilero-vad): 30 ms frames → 512-sample chunks, hysteresis
@@ -74,11 +74,20 @@ lauche.sh         Legacy record-then-transcribe script (predecessor, kept for re
 - **Never lose transcript text.** Raw lines are appended to disk immediately. The final
   rewrite goes through a `.tmp` file and `replace`. If Ollama fails for any reason, keep
   the raw transcript and warn; don't crash. Raw text is only removed once a polish succeeded.
-- **Output layout**: `<output_dir>/transcripts/YYYY-MM/<name>.md` (`writer.session_path`) and
+- **Output layout**: `<output_dir>/transcripts/<type>/YYYY-MM/<name>.md` (`writer.session_path`) and
   `<output_dir>/index.md`, which is always regenerated from all session files' front matter
   (never edited incrementally) after each recording and by `mic2md reindex`. It has a
   table per month (with tags), a `## Tags` section (tag → notes) and a footer linking
   `REPO_URL` (`mic2md/__init__.py`).
+- **Session types**: `writer.SessionType` (`meeting`, the default, and `thoughts`); the value is
+  both the `type:` front matter and the folder under `transcripts/`. `writer.session_type(meta)`
+  reads it; a missing or unknown value means `meeting` (files from before types). Chosen with
+  `--type/-T` (`MIC2MD_TYPE`, shared option) on `main`, `polish` and `summarize`; on `polish` it
+  only matters for imports. Thoughts skip the calendar (`cli._session_meta`) and get
+  `llm.THOUGHTS_SUMMARY_PROMPT` (`llm.SUMMARY_PROMPTS`, keyed by type). The index has a Type
+  column. `mic2md reindex` (`index.migrate_flat`) moves the pre-types `transcripts/YYYY-MM/`
+  folders (and root-level files) into `transcripts/meeting/`. Adding a type: a `SessionType`
+  value plus, if it should summarize differently, a `SUMMARY_PROMPTS` entry.
 - **Bare `mic2md` always summarizes**: `main` sets `ctx.obj[RECORD_KEY]` then
   `ctx.invoke(summarize, ctx, ...)` with no `file`, so plain recording and `summarize` (no
   FILE) are the same code path. `summarize` without FILE records first: `_record_for_summary`
@@ -120,9 +129,13 @@ lauche.sh         Legacy record-then-transcribe script (predecessor, kept for re
   → `Transcriber.last_uncertain`. `Recorder.commit` underlines them (`ui.highlight_uncertain`)
   and writes `word(?)` (`mark_uncertain`); `SYSTEM_PROMPT` tells the LLM to fix and drop it.
 - **Importing**: `polish` or `summarize` on a file outside `--output-dir` calls `_import_external` (asks
-  for date/language/meeting/participants on a TTY, defaults otherwise) and
-  `writer.import_document`, which copies it into `transcripts/YYYY-MM/` under a free
-  session name. The source file is never modified.
+  for date/language/type, and meeting/participants for meetings, on a TTY, defaults
+  otherwise) and `writer.import_document`, which copies it into `transcripts/<type>/YYYY-MM/`
+  under a free
+  session name. The source file is never modified. `notes` does the same for text read from
+  stdin (paste + Ctrl+D, or a pipe) with `source: pasted`, and never calls the LLM. Both
+  ask through `_ask_front_matter` (`_interactive()` = stdin is a TTY; on a TTY, stdin can
+  still be read after the Ctrl+D that ended the paste).
 - **File names** come from `writer.session_filename`: `%Y-%m-%dT%H-%M-%S.md`, ISO 8601 with
   `-` instead of `:`, plus a `-<slug>` suffix (`slugify_title`, lowercase-hyphenated, max 20
   chars) when a meeting title is known. `index._SESSION_NAME` and `migrate_flat` must accept

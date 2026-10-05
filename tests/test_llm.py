@@ -222,3 +222,20 @@ def test_summary_messages_include_typed_notes():
     assert "<notes>\n[00:00:05] Bo owns it\n</notes>" in msgs[1]["content"]
     assert "<notes>" in msgs[0]["content"]  # the rule explaining them
     assert "<notes>\n" not in llm.build_summary_messages("hi", "en")[1]["content"]
+
+
+def test_thoughts_get_their_own_summary_prompt():
+    thoughts = llm.build_summary_messages("an idea", "sv", session_type="thoughts")[0]["content"]
+    meeting = llm.build_summary_messages("an idea", "sv")[0]["content"]
+    assert thoughts.startswith(llm.THOUGHTS_SUMMARY_PROMPT.format(language="Swedish")[:60])
+    assert "Key ideas" in thoughts and "Action items" not in thoughts
+    assert "Action items" in meeting
+    # An unknown type falls back to the meeting prompt.
+    assert llm.build_summary_messages("x", "en", session_type="podcast")[0]["content"].startswith(
+        llm.SUMMARY_PROMPT.format(language="English")[:60]
+    )
+
+
+def test_notes_and_tags_wording_fits_every_type():
+    assert "meeting" not in llm.notes_block(["[00:00:01] x"])
+    assert "meeting notes" not in llm.TAGS_PROMPT
