@@ -226,8 +226,18 @@ def _meeting_meta() -> dict[str, str]:
 
 
 def _session_meta(opts: RecordOptions) -> dict[str, str]:
-    """Meeting front matter for a new recording; thoughts never look at the calendar."""
-    if opts.session_type is not SessionType.meeting or opts.no_calendar:
+    """Meeting front matter for a new recording; thoughts never look at the calendar.
+
+    A given --meeting or --participants (for a caller such as McBrain) is used as it is:
+    no calendar lookup and no prompts. Thoughts ignore both options."""
+    if opts.session_type is not SessionType.meeting:
+        return {}
+    if opts.meeting or opts.participants:
+        return {
+            "meeting": " ".join(opts.meeting.split()),
+            "participants": _normalize_participants(opts.participants),
+        }
+    if opts.no_calendar:
         return {}
     return _meeting_meta()
 
@@ -743,6 +753,32 @@ def main(
             help="Don't look up or ask for the current meeting.",
         ),
     ] = False,
+    meeting: Annotated[
+        str,
+        typer.Option(
+            "--meeting",
+            envvar="MIC2MD_MEETING",
+            help="Meeting title for the session (skips the calendar and the prompts). "
+            "Meetings only; ignored with --type thoughts.",
+        ),
+    ] = "",
+    participants: Annotated[
+        str,
+        typer.Option(
+            "--participants",
+            envvar="MIC2MD_PARTICIPANTS",
+            help="Comma-separated participant names, with --meeting. Ignored with --type thoughts.",
+        ),
+    ] = "",
+    session_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--session-file",
+            dir_okay=False,
+            help="Write the absolute path of the session file to this file as soon as it "
+            "is created, so another program can follow the transcript.",
+        ),
+    ] = None,
     glossary: GlossaryOpt = None,
     show_transcript: Annotated[
         bool,
@@ -781,6 +817,9 @@ def main(
         silence_ms=silence_ms,
         threshold=threshold,
         no_calendar=no_calendar,
+        meeting=meeting,
+        participants=participants,
+        session_file=session_file,
         vad=vad,
         beam_size=beam_size,
         show_transcript=show_transcript,
@@ -846,6 +885,9 @@ class RecordOptions:
     silence_ms: int = 700
     threshold: float | None = None
     no_calendar: bool = False
+    meeting: str = ""
+    participants: str = ""
+    session_file: Path | None = None
     vad: Vad = Vad.silero
     beam_size: int = 5
     show_transcript: bool = False
@@ -858,6 +900,15 @@ def _done() -> None:
     if _screen is not None:
         _screen.view.done = True
         _screen.view.stage = ""
+
+
+def _write_session_file(target: Path, session: Path) -> None:
+    """Write the session's absolute path to ``target``; a rename, so readers never see a
+    partial path."""
+    target = target.expanduser()
+    tmp = target.with_name(target.name + ".tmp")
+    tmp.write_text(str(session.resolve()) + "\n", encoding="utf-8")
+    tmp.replace(target)
 
 
 def _record(
@@ -918,6 +969,8 @@ def _record(
         extra_meta=meeting_meta,
         session_type=opts.session_type,
     )
+    if opts.session_file:
+        _write_session_file(opts.session_file, writer.path)
     view = LiveView(
         language,
         model_name,
