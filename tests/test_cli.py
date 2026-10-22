@@ -861,3 +861,183 @@ def test_notes_with_nothing_pasted_saves_nothing(tmp_path, monkeypatch):
     result = CliRunner().invoke(cli.app, ["notes", "-o", str(tmp_path)], input="  \n")
     assert result.exit_code == 1
     assert not (tmp_path / "transcripts").exists()
+
+
+def _stub_recording(tmp_path, monkeypatch):
+    """Run the real `_record` without a mic, Whisper, the calendar or Ollama.
+
+    Returns a dict: ``calendar`` counts calendar lookups, ``vocabulary`` is the Whisper prompt.
+    """
+    from types import SimpleNamespace
+
+    from mic2md import cli, meetings
+    from mic2md import transcriber as transcriber_module
+
+    seen = {"calendar": 0, "vocabulary": None}
+
+    class FakeTranscriber:
+        def __init__(self, *args, **kwargs):
+            self.vocabulary = ""
+            seen["vocabulary"] = self
+
+        def close(self):
+            pass
+
+    class FakeMic:
+        def __init__(self, device=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def calendar():
+        seen["calendar"] += 1
+        return []
+
+    def run(self, mic):
+        self.writer.append("We ship on Friday.")
+
+    monkeypatch.setattr(transcriber_module, "Transcriber", FakeTranscriber)
+    monkeypatch.setattr(cli, "MicStream", FakeMic)
+    monkeypatch.setattr(cli.Recorder, "run", run)
+    monkeypatch.setattr(cli.Recorder, "finish", lambda self, mic: None)
+    monkeypatch.setattr(cli, "_detector", lambda opts: None)
+    monkeypatch.setattr(cli.models, "get_spec", lambda lang, size: SimpleNamespace(size="tiny"))
+    monkeypatch.setattr(cli.models, "ensure_model", lambda spec, console: tmp_path / "m.bin")
+    monkeypatch.setattr(meetings, "current_meetings", calendar)
+    monkeypatch.setattr(cli.llm, "check", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_stream_llm", _fake_llm("## Summary\n\nWe ship."))
+    monkeypatch.delenv("MIC2MD_TYPE", raising=False)
+    monkeypatch.delenv("MIC2MD_MEETING", raising=False)
+    monkeypatch.delenv("MIC2MD_PARTICIPANTS", raising=False)
+    return seen
+
+
+def _only_session(out):
+    (session,) = (out / "transcripts").rglob("*.md")
+    return session
+
+
+def test_meeting_and_participants_skip_calendar_and_set_front_matter(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from mic2md import cli
+
+    seen = _stub_recording(tmp_path, monkeypatch)
+    out = tmp_path / "out"
+    args = ["--meeting", "Sprint  Review", "--participants", " Ana ,Erik,, ", "-o", str(out)]
+    result = CliRunner().invoke(cli.app, [*args, "summarize"], input="")
+
+    assert result.exit_code == 0, result.output
+    assert seen["calendar"] == 0
+    session = _only_session(out)
+    assert session.name.endswith("-sprint-review.md")
+    text = session.read_text()
+    assert "meeting: Sprint Review\n" in text
+    assert "participants: Ana, Erik\n" in text
+    assert "Meeting: Sprint Review." in seen["vocabulary"].vocabulary
+    assert "Participants: Ana, Erik." in seen["vocabulary"].vocabulary
+
+
+def test_only_meeting_leaves_participants_empty(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from mic2md import cli
+
+    seen = _stub_recording(tmp_path, monkeypatch)
+    # Non-TTY stdin and no prompt allowed: a missing participants list must not ask.
+    monkeypatch.setattr(cli, "_ask", lambda *a, **k: pytest.fail("prompted"))
+    out = tmp_path / "out"
+    args = ["--meeting", "Standup", "-o", str(out), "summarize"]
+    assert CliRunner().invoke(cli.app, args, input="").exit_code == 0
+
+    assert seen["calendar"] == 0
+    session = _only_session(out)
+    assert session.name.endswith("-standup.md")
+    assert "meeting: Standup\n" in session.read_text()
+    assert "\nparticipants:\n" in session.read_text()
+
+
+def test_meeting_env_vars_are_used_and_flags_win(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from mic2md import cli
+
+    seen = _stub_recording(tmp_path, monkeypatch)
+    monkeypatch.setenv("MIC2MD_MEETING", "Env Meeting")
+    monkeypatch.setenv("MIC2MD_PARTICIPANTS", "Ada, Bob")
+    out = tmp_path / "out"
+    assert CliRunner().invoke(cli.app, ["-o", str(out), "summarize"], input="").exit_code == 0
+    assert seen["calendar"] == 0
+    text = _only_session(out).read_text()
+    assert "meeting: Env Meeting\n" in text and "participants: Ada, Bob\n" in text
+
+    out2 = tmp_path / "out2"
+    args = ["--meeting", "Flag Meeting", "-o", str(out2), "summarize"]
+    assert CliRunner().invoke(cli.app, args, input="").exit_code == 0
+    text = _only_session(out2).read_text()
+    assert "meeting: Flag Meeting\n" in text and "participants: Ada, Bob\n" in text
+
+
+def test_meeting_options_are_ignored_for_thoughts(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from mic2md import cli
+
+    seen = _stub_recording(tmp_path, monkeypatch)
+    out = tmp_path / "out"
+    args = ["-T", "thoughts", "--meeting", "Standup", "--participants", "Ada", "-o", str(out)]
+    assert CliRunner().invoke(cli.app, [*args, "summarize"], input="").exit_code == 0
+    assert seen["calendar"] == 0
+    session = next((out / "transcripts" / "thoughts").rglob("*.md"))
+    assert "meeting" not in session.read_text()
+    assert "participants" not in session.read_text()
+
+
+def test_meeting_options_go_before_the_command_only(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from mic2md import cli
+
+    _stub_recording(tmp_path, monkeypatch)
+    args = ["summarize", "--meeting", "Standup", "-o", str(tmp_path)]
+    assert CliRunner().invoke(cli.app, args, input="").exit_code == 2
+
+
+def test_session_meta_uses_given_values_before_the_calendar(monkeypatch):
+    from mic2md import cli
+
+    monkeypatch.setattr(cli, "_meeting_meta", lambda: pytest.fail("calendar used"))
+    opts = cli.RecordOptions(meeting=" Review ", participants="Ana,Bob", no_calendar=True)
+    assert cli._session_meta(opts) == {"meeting": "Review", "participants": "Ana, Bob"}
+    assert cli._session_meta(cli.RecordOptions(participants="Ana")) == {
+        "meeting": "",
+        "participants": "Ana",
+    }
+
+
+def test_session_file_gets_the_absolute_path_as_soon_as_it_exists(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from mic2md import cli
+
+    _stub_recording(tmp_path, monkeypatch)
+    target = tmp_path / "session.txt"
+    written_during_run = []
+
+    def run(self, mic):
+        written_during_run.append(target.read_text() if target.exists() else None)
+        self.writer.append("We ship on Friday.")
+
+    monkeypatch.setattr(cli.Recorder, "run", run)
+    out = tmp_path / "out"
+    args = ["--session-file", str(target), "--meeting", "Standup", "-o", str(out)]
+    assert CliRunner().invoke(cli.app, [*args, "summarize"], input="").exit_code == 0
+
+    session = _only_session(out)
+    assert written_during_run == [str(session.resolve()) + "\n"]
+    assert target.read_text() == str(session.resolve()) + "\n"
+    assert not (tmp_path / "session.txt.tmp").exists()

@@ -144,6 +144,8 @@ mic2md -l sv                            # record in Swedish (KB-Whisper large)
 mic2md -m small.en                      # faster, smaller English model
 mic2md --no-llm                         # raw transcript only, no LLM pass
 mic2md --no-calendar                    # don't look up or ask for the meeting
+mic2md --meeting "Standup" --participants "Ana, Erik" summarize   # known meeting, no prompts
+mic2md --session-file ~/tmp/mic2md-session.txt   # write the session file's path there, for tailing
 mic2md -T thoughts                      # general thoughts: no calendar, ideas + next steps
 mic2md --backend claude                 # polish with Claude (`claude -p`) instead of Ollama
 mic2md summarize                        # record a meeting, polish it, then add meeting notes
@@ -172,7 +174,8 @@ mic2md models                           # list models and which are downloaded
 `--backend`, `--llm`, `--lang`, `--ollama-url`, `--output-dir` and `--glossary` also work
 with the commands, before or after the command name: `mic2md -b claude summarize FILE` and
 `mic2md summarize FILE -b claude` do the same thing. Recording-only options (`-m`,
-`--model-path`, `-d`, `--silence-ms`, `--threshold`, `--no-calendar`) go before the command,
+`--model-path`, `-d`, `--silence-ms`, `--threshold`, `--no-calendar`, `--meeting`,
+`--participants`, `--session-file`) go before the command,
 e.g. `mic2md -d 3 summarize`.
 
 ### Commands
@@ -202,6 +205,9 @@ Without a command, `mic2md` records, polishes and summarizes. `p` and `s` are sh
 | `--glossary` | `MIC2MD_GLOSSARY` | `glossary.txt` in the output folder, if present | Names and terms, one per line, for Whisper and the LLM |
 | `-T, --type` | `MIC2MD_TYPE` | `meeting` | `meeting` or `thoughts`: picks the folder under `transcripts/`, the summary style, and (thoughts) skips the calendar. Also on `polish`/`summarize` for imports |
 | `--no-calendar` | `MIC2MD_NO_CALENDAR` | off | Skip the meeting lookup (Calendar, then a prompt if none is found) |
+| `--meeting` | `MIC2MD_MEETING` | | Meeting title for the session. Skips the calendar and the prompts; also used for the file name, Whisper's vocabulary and the glossary. Meetings only (ignored with `-T thoughts`) |
+| `--participants` | `MIC2MD_PARTICIPANTS` | | Comma-separated names, used with `--meeting` (or alone; then the title stays empty). Ignored with `-T thoughts` |
+| `--session-file` | | | Write the absolute path of the session file to this file as soon as it's created, so another program can follow the transcript |
 | `--fullscreen / --no-fullscreen` | `MIC2MD_FULLSCREEN` | on | Use the whole terminal while recording; `--no-fullscreen` shows a one-line status bar instead |
 | `-t, --transcript` | | off | Also print the transcript to the terminal (in fullscreen: when recording stops, so it stays in the scrollback) |
 | `--ollama-url` | `OLLAMA_HOST` | `http://localhost:11434` | Ollama server |
